@@ -1,0 +1,966 @@
+#!/usr/bin/env python3
+"""
+Tso Moriri, new moon, the river comes down to the water
+
+    python tso_moriri_new_moon_the_river_comes_down_to_the_water.py        # the picture, 4200 x 2800
+    python tso_moriri_new_moon_the_river_comes_down_to_the_water.py 0.3    # a study
+
+North shore, 4,522 m, late April, about half past two.  The centre of the
+galaxy is seventeen degrees up in the south-south-east and the band leans
+away to the north-east at twenty-five degrees, which is what it does at
+this latitude at that hour.  Nothing is photographed and no catalogue is
+read.  The galaxy is a disc and a bulge seen from inside, the dust is
+nine shells of noise between here and the centre, the stars are drawn
+one at a time, the ridges and the stones are heightfields, the water is
+a mirror with a little wind on it.
+
+Needs numpy, scipy, numba, pillow.
+"""
+import sys, os, math, time
+import numpy as np
+from numba import njit, prange
+from scipy.ndimage import gaussian_filter
+from PIL import Image, ImageDraw
+
+S = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
+W = int(round(4200 * S)); H = int(round(2800 * S))
+F = 2100.0 * S                       # focal length in pixels: 90 degrees across
+YH = 0.63 * H                        # the horizon row
+PITCH = math.atan((YH - H / 2) / F)
+CP = math.cos(PITCH); SP = math.sin(PITCH)
+CAMH = 1.7                           # metres above the water
+SEED = 2019
+FREF = 5.5                           # what a sixth-magnitude star puts on the print
+D2R = math.pi / 180.0
+NS = int(math.ceil(YH)) + 2          # rows that hold sky
+
+# ---------------------------------------------------------------------
+#  where the galaxy is tonight
+# ---------------------------------------------------------------------
+GC_AZ = 17.5 * D2R; GC_ALT = 17.0 * D2R; GC_INC = 25.0 * D2R
+_gx = np.array([math.sin(GC_AZ) * math.cos(GC_ALT), math.cos(GC_AZ) * math.cos(GC_ALT), math.sin(GC_ALT)])
+_up = np.array([0, 0, 1.0]) - _gx[2] * _gx; _up /= np.linalg.norm(_up)
+_rt = np.cross(_gx, _up)
+_gy = -math.cos(GC_INC) * _rt + math.sin(GC_INC) * _up
+_gz = np.cross(_gx, _gy)
+GAL = np.stack([_gx, _gy, _gz]).astype(np.float64)   # rows: toward centre, toward l=90, toward the pole
+
+# dust shells: distance (kpc), opacity, angular frequency, octaves, tilt toward +b
+SK = np.array([0.13, 0.20, 0.32, 0.50, 0.80, 1.30, 2.10, 3.40, 5.50])
+AK = np.array([2.0, 2.1, 2.3, 2.5, 2.8, 3.4, 4.2, 5.5, 7.0])
+HK = np.array([0.013, 0.019, 0.027, 0.036, 0.048, 0.058, 0.062, 0.065, 0.065])   # scale height seen from here
+TK = np.array([0.16, 0.14, 0.10, 0.06, 0.02, 0.0, 0.0, 0.0, 0.0])            # how sparse the clouds are
+FK = 2.6 * (SK / 0.13) ** 0.55
+OK = np.array([8, 8, 8, 7, 7, 7, 6, 6, 6])
+BK = np.array([0.075, 0.065, 0.05, 0.03, 0.012, 0.0, 0.0, 0.0, 0.0])
+
+# the tent rope: two thin dark lines leaving the bulge on the north side
+ROPE = np.array([[3.2, 2.2, -7.5, 15.5, 0.26, 1.9],
+                 [5.4, 3.6, -3.0, 13.5, 0.17, 1.0]])
+
+
+def rope_centre(k, t):
+    """(l, b) in degrees along rope k at parameter t."""
+    l0, b0, l1, b1 = ROPE[k, :4]
+    nx, ny = -(b1 - b0), (l1 - l0)
+    n = math.hypot(nx, ny); nx /= n; ny /= n
+    w = 0.55 * math.sin(t * 5.3 + 1.1 + 2.0 * k) + 0.25 * math.sin(t * 13.0 + 0.4)
+    return l0 + (l1 - l0) * t + nx * w, b0 + (b1 - b0) * t + ny * w
+
+
+# ---------------------------------------------------------------------
+#  noise
+# ---------------------------------------------------------------------
+@njit(cache=True, fastmath=True, inline='always')
+def _h3(ix, iy, iz, sd):
+    n = (ix * 73856093) ^ (iy * 19349663) ^ (iz * 83492791) ^ (sd * 2654435761)
+    n &= 0xFFFFFFFF
+    n = ((n ^ (n >> 15)) * 2246822519) & 0xFFFFFFFF
+    n = ((n ^ (n >> 13)) * 3266489917) & 0xFFFFFFFF
+    n ^= n >> 16
+    return n / 4294967296.0
+
+
+@njit(cache=True, fastmath=True)
+def noise3(x, y, z, sd):
+    fx = math.floor(x); fy = math.floor(y); fz = math.floor(z)
+    ix = int(fx); iy = int(fy); iz = int(fz)
+    tx = x - fx; ty = y - fy; tz = z - fz
+    ux = tx * tx * tx * (tx * (tx * 6 - 15) + 10)
+    uy = ty * ty * ty * (ty * (ty * 6 - 15) + 10)
+    uz = tz * tz * tz * (tz * (tz * 6 - 15) + 10)
+    a = _h3(ix, iy, iz, sd); b = _h3(ix + 1, iy, iz, sd)
+    c = _h3(ix, iy + 1, iz, sd); d = _h3(ix + 1, iy + 1, iz, sd)
+    e = _h3(ix, iy, iz + 1, sd); f = _h3(ix + 1, iy, iz + 1, sd)
+    g = _h3(ix, iy + 1, iz + 1, sd); h = _h3(ix + 1, iy + 1, iz + 1, sd)
+    ab = a + (b - a) * ux; cd = c + (d - c) * ux
+    ef = e + (f - e) * ux; gh = g + (h - g) * ux
+    v0 = ab + (cd - ab) * uy; v1 = ef + (gh - ef) * uy
+    return 2.0 * (v0 + (v1 - v0) * uz) - 1.0
+
+
+@njit(cache=True, fastmath=True)
+def noise2(x, y, sd):
+    fx = math.floor(x); fy = math.floor(y)
+    ix = int(fx); iy = int(fy)
+    tx = x - fx; ty = y - fy
+    ux = tx * tx * tx * (tx * (tx * 6 - 15) + 10)
+    uy = ty * ty * ty * (ty * (ty * 6 - 15) + 10)
+    a = _h3(ix, iy, 0, sd); b = _h3(ix + 1, iy, 0, sd)
+    c = _h3(ix, iy + 1, 0, sd); d = _h3(ix + 1, iy + 1, 0, sd)
+    ab = a + (b - a) * ux; cd = c + (d - c) * ux
+    return 2.0 * (ab + (cd - ab) * uy) - 1.0
+
+
+@njit(cache=True, fastmath=True)
+def fbm3(x, y, z, o, sd):
+    s = 0.0; a = 0.5
+    for i in range(o):
+        s += a * noise3(x, y, z, sd + i)
+        nx = 1.60 * y + 1.20 * z; ny = -1.60 * x + 0.72 * y - 0.96 * z; nz = -1.20 * x - 0.96 * y + 1.28 * z
+        x = nx + 3.1; y = ny + 1.7; z = nz + 5.3
+        a *= 0.5
+    return s
+
+
+@njit(cache=True, fastmath=True)
+def ridged3(x, y, z, o, sd):
+    s = 0.0; a = 0.5; w = 1.0; nrm = 0.0
+    for i in range(o):
+        r = 1.0 - abs(noise3(x, y, z, sd + i))
+        r = r * r
+        s += a * r * w; nrm += a
+        w = min(1.0, r * 1.6 + 0.15)
+        nx = 1.64 * y + 1.23 * z; ny = -1.64 * x + 0.738 * y - 0.984 * z; nz = -1.23 * x - 0.984 * y + 1.312 * z
+        x = nx + 3.1; y = ny + 1.7; z = nz + 5.3
+        a *= 0.56
+    return s / nrm
+
+
+@njit(cache=True, fastmath=True)
+def fbm2(x, y, o, sd):
+    s = 0.0; a = 0.5
+    for i in range(o):
+        s += a * noise2(x, y, sd + i)
+        nx = 1.6 * x + 1.2 * y; ny = -1.2 * x + 1.6 * y
+        x = nx + 7.3; y = ny + 2.9
+        a *= 0.5
+    return s
+
+
+@njit(cache=True, fastmath=True)
+def rfbm2(x, y, o, sd):
+    s = 0.0; a = 0.5; w = 1.0
+    for i in range(o):
+        r = 1.0 - abs(noise2(x, y, sd + i))
+        r = r * r * w
+        s += a * r
+        w = min(1.0, max(0.0, r * 1.8))
+        nx = 1.62 * x + 1.21 * y; ny = -1.21 * x + 1.62 * y
+        x = nx + 7.3; y = ny + 2.9
+        a *= 0.5
+    return s
+
+
+@njit(cache=True, fastmath=True, inline='always')
+def sstep(a, b, x):
+    t = (x - a) / (b - a)
+    if t < 0.0: t = 0.0
+    if t > 1.0: t = 1.0
+    return t * t * (3.0 - 2.0 * t)
+
+
+# ---------------------------------------------------------------------
+#  the dust.  My grandmother named these.
+# ---------------------------------------------------------------------
+@njit(cache=True, fastmath=True)
+def cloud(x, y, z, sd, o, th):
+    wx = fbm3(x * 0.7 + 11.3, y * 0.7 + 5.1, z * 0.7 + 2.9, 3, sd + 101)
+    wy = fbm3(x * 0.7 + 3.7, y * 0.7 + 19.1, z * 0.7 + 7.7, 3, sd + 202)
+    wz = fbm3(x * 0.7 + 8.9, y * 0.7 + 1.3, z * 0.7 + 13.1, 3, sd + 303)
+    x += 0.60 * wx; y += 0.60 * wy; z += 0.60 * wz
+    m = fbm3(x, y, z, 4, sd)
+    r = ridged3(x * 2.3 + 0.35 * wy, y * 2.3 + 0.35 * wz, z * 2.3 + 0.35 * wx, o, sd + 7)
+    v = m * 1.6 + 1.0 * (r - 0.50)
+    d = sstep(th, th + 0.78, v)
+    return d ** 1.5 * (0.55 + 0.9 * r) * 1.6
+
+
+@njit(cache=True, fastmath=True, inline='always')
+def pix_dir(px, py, W, H, F, CPc, SPc):
+    u = (px - 0.5 * W) / F; v = (0.5 * H - py) / F
+    dx = u; dy = CPc - v * SPc; dz = SPc + v * CPc
+    n = 1.0 / math.sqrt(dx * dx + dy * dy + dz * dz)
+    return dx * n, dy * n, dz * n
+
+
+@njit(cache=True, fastmath=True, parallel=True)
+def sky_pass(NSr, W, H, F, CPc, SPc, G, SKa, AKa, FKa, OKa, BKa, HKa, TKa, ROPEa, NEB, mw, e0m, taum, taun):
+    K = SKa.shape[0]
+    zsun = 0.015
+    for j in prange(NSr):
+        tk = np.zeros(K)
+        for i in range(W):
+            dx, dy, dz = pix_dir(i + 0.5, j + 0.5, W, H, F, CPc, SPc)
+            if dz < -0.01:
+                continue
+            X = dx * G[0, 0] + dy * G[0, 1] + dz * G[0, 2]
+            Y = dx * G[1, 0] + dy * G[1, 1] + dz * G[1, 2]
+            Z = dx * G[2, 0] + dy * G[2, 1] + dz * G[2, 2]
+            cb = math.sqrt(max(1e-9, 1.0 - Z * Z))
+            ldeg = math.atan2(Y, X) * 57.29578; bdeg = math.asin(Z) * 57.29578
+            # ---- shells of dust
+            tn = 0.0; tt = 0.0
+            for k in range(K):
+                s = SKa[k]
+                zz = s * (Z - BKa[k] * cb * max(0.0, X)) + zsun
+                R = math.sqrt((8.0 - s * X) ** 2 + (s * Y) ** 2)
+                prof = math.exp(-abs(zz) / HKa[k]) * math.exp(-(max(R, 3.0) - 8.0) / 4.5)
+                a = AKa[k] * prof
+                if k < 5:
+                    a *= 0.30 + 0.70 * sstep(42.0, 12.0, abs(ldeg))
+                if a < 0.004:
+                    tk[k] = 0.0
+                    continue
+                f = FKa[k]
+                c = cloud(X * f + 13.7 * k, Y * f - 7.1 * k, Z * f + 3.3 * k, 1000 + 37 * k, OKa[k], TKa[k])
+                tk[k] = a * (c + (0.04 if k < 5 else 0.09))
+            # the tent rope
+            for q in range(ROPEa.shape[0]):
+                l0 = ROPEa[q, 0]; b0 = ROPEa[q, 1]; l1 = ROPEa[q, 2]; b1 = ROPEa[q, 3]
+                ex = l1 - l0; ey = b1 - b0; L2 = ex * ex + ey * ey
+                t = ((ldeg - l0) * ex + (bdeg - b0) * ey) / L2
+                if t > -0.1 and t < 1.1:
+                    Ln = math.sqrt(L2)
+                    nx = -ey / Ln; ny = ex / Ln
+                    wob = 0.55 * math.sin(t * 5.3 + 1.1 + 2.0 * q) + 0.25 * math.sin(t * 13.0 + 0.4)
+                    dd = (ldeg - l0) * nx + (bdeg - b0) * ny - wob
+                    dd += 0.16 * noise2(ldeg * 1.3 + 7.0, bdeg * 1.3, 57) + 0.07 * noise2(ldeg * 4.0, bdeg * 4.0 + 2.0, 58)
+                    wd = ROPEa[q, 4] * (1.0 + 0.55 * noise2(t * 7.0, 3.3 + q, 55)) * (0.75 + 0.6 * t)
+                    g = 1.0 / (1.0 + (dd / wd) ** 2) ** 1.6
+                    fr = max(0.0, 0.55 + 0.75 * noise2(ldeg * 1.1, bdeg * 1.1, 56) + 0.3 * noise2(ldeg * 5.0, bdeg * 5.0, 59))
+                    tk[1] += ROPEa[q, 5] * g * fr * sstep(-0.08, 0.06, t) * sstep(1.08, 0.75, t)
+            for k in range(K):
+                tt += tk[k]
+                if k < 5: tn += tk[k]
+            # ---- the light, marched out through the shells
+            T0 = 1.0; T1 = 1.0; T2 = 1.0
+            a0 = 0.0; a1 = 0.0; a2 = 0.0; e0 = 0.0
+            kk = 0; s = 0.01
+            mott = 1.0 + 0.22 * fbm3(X * 46.0, Y * 46.0, Z * 46.0, 4, 31) + 0.10 * fbm3(X * 300.0, Y * 300.0, Z * 300.0, 3, 32)
+            while s < 22.0:
+                ds = 0.015 + 0.045 * s
+                if ds > 0.30: ds = 0.30
+                sm = s + 0.5 * ds
+                while kk < K and SKa[kk] < sm:
+                    tv = tk[kk]
+                    T0 *= math.exp(-0.80 * tv); T1 *= math.exp(-tv); T2 *= math.exp(-1.22 * tv)
+                    kk += 1
+                xg = sm * X - 8.0; yg = sm * Y; zg = sm * Z + zsun
+                R = math.sqrt(xg * xg + yg * yg)
+                arm = noise3(xg * 0.8 + 3.1, yg * 0.8 + 7.7, zg * 3.0, 77)
+                arm2 = noise3(xg * 2.6 + 1.1, yg * 2.6 + 4.2, zg * 8.0, 78)
+                az = abs(zg)
+                rd = math.exp(-(R - 8.0) / 2.6) * (0.90 * math.exp(-az / 0.22) + 0.07 * math.exp(-az / 0.60))
+                rd *= 1.35 * (1.0 + 0.68 * arm + 0.36 * arm2) * mott
+                mb = math.sqrt((xg / 1.35) ** 2 + (yg / 0.90) ** 2 + (zg / 0.68) ** 2)
+                rb = 54.0 * math.exp(-2.2 * mb ** 1.4) * (0.6 + 0.4 * mott)
+                a0 += (rd * 0.80 + rb * 1.08) * T0 * ds
+                a1 += (rd * 0.92 + rb * 0.90) * T1 * ds
+                a2 += (rd * 1.10 + rb * 0.66) * T2 * ds
+                e0 += (rd + rb) * ds
+                s += ds
+            # ---- a few knots of hydrogen, in front, muted
+            for q in range(NEB.shape[0]):
+                dl = ldeg - NEB[q, 0]; db = bdeg - NEB[q, 1]
+                rr = (dl * dl + db * db) / (NEB[q, 2] * NEB[q, 2])
+                if rr < 6.0:
+                    sh = math.exp(-rr) * max(0.0, 0.55 + 1.3 * fbm3(X * 150.0 + q, Y * 150.0, Z * 150.0, 4, 90 + q))
+                    sh *= NEB[q, 3] * math.exp(-0.35 * tn)
+                    a0 += sh * 1.00; a1 += sh * 0.30; a2 += sh * 0.36
+            mw[j, i, 0] = a0; mw[j, i, 1] = a1; mw[j, i, 2] = a2
+            e0m[j, i] = e0; taum[j, i] = tt; taun[j, i] = tn
+
+
+# ---------------------------------------------------------------------
+#  stars, one at a time
+# ---------------------------------------------------------------------
+def bb_rgb(T):
+    """Black-body colour, linear, unit green."""
+    t = T / 100.0
+    r = np.where(t <= 66, 255.0, 329.698727446 * np.maximum(t - 60, 1e-3) ** -0.1332047592)
+    g = np.where(t <= 66, 99.4708025861 * np.log(np.maximum(t, 1)) - 161.1195681661,
+                 288.1221695283 * np.maximum(t - 60, 1e-3) ** -0.0755148492)
+    b = np.where(t >= 66, 255.0, np.where(t <= 19, 0.0,
+                 138.5177312231 * np.log(np.maximum(t - 10, 1e-3)) - 305.0447927307))
+    c = np.stack([r, g, b], -1).clip(0, 255) / 255.0
+    c = c ** 2.2
+    l = 0.2126 * c[..., 0] + 0.7152 * c[..., 1] + 0.0722 * c[..., 2]
+    return c / l[..., None]
+
+
+@njit(cache=True, fastmath=True)
+def splat(img, xs, ys, fl, col, hs):
+    Hh = img.shape[0]; Ww = img.shape[1]
+    n = xs.shape[0]
+    for q in range(n):
+        f = fl[q]
+        x = xs[q]; y = ys[q]
+        # core, skirt, and for the few that blaze a small soft halo
+        rad = 2
+        if f > 0.6: rad = 4
+        if f > 8.0: rad = int(min(70.0 * hs, 5.0 + 2.6 * hs * f ** 0.42))
+        x0 = int(math.floor(x)) - rad; x1 = int(math.floor(x)) + rad + 1
+        y0 = int(math.floor(y)) - rad; y1 = int(math.floor(y)) + rad + 1
+        if x1 < 0 or y1 < 0 or x0 >= Ww or y0 >= Hh:
+            continue
+        s1 = 0.60; s2 = 1.35 * max(1.0, hs ** 0.5); r0 = 3.2 * hs
+        k1 = 0.84 / (6.2832 * s1 * s1); k2 = 0.13 / (6.2832 * s2 * s2)
+        k3 = 0.03 * 0.9 / (3.14159 * r0 * r0)
+        for yy in range(max(0, y0), min(Hh, y1 + 1)):
+            for xx in range(max(0, x0), min(Ww, x1 + 1)):
+                ddx = xx + 0.5 - x; ddy = yy + 0.5 - y
+                r2 = ddx * ddx + ddy * ddy
+                v = k1 * math.exp(-r2 / (2 * s1 * s1))
+                if rad > 2:
+                    v += k2 * math.exp(-r2 / (2 * s2 * s2))
+                if rad > 4:
+                    v += k3 * (1.0 + r2 / (r0 * r0)) ** -1.9 * sstep(rad * rad, 0.3 * rad * rad, r2)
+                v *= f
+                img[yy, xx, 0] += v * col[q, 0]
+                img[yy, xx, 1] += v * col[q, 1]
+                img[yy, xx, 2] += v * col[q, 2]
+
+
+def make_stars(e0, tau, taun, rng):
+    N = 7_000_000
+    a = 0.50; m_lo = 0.9; m_hi = 14.0
+    e0n = (e0 / np.percentile(e0, 99.7)).clip(0, 1) ** 0.62
+    out_x = []; out_y = []; out_m = []
+    got = 0
+    while got < N:
+        n = 4_000_000
+        u = rng.random(n)
+        m = np.log10(u * (10 ** (a * m_hi) - 10 ** (a * m_lo)) + 10 ** (a * m_lo)) / a
+        x = rng.random(n) * W; y = rng.random(n) * (YH + 1.0)
+        ix = np.minimum(x.astype(np.int32), W - 1); iy = np.minimum(y.astype(np.int32), NS - 1)
+        uu = (x - W / 2) / F; vv = (H / 2 - y) / F
+        sol = (1 + uu * uu + vv * vv) ** -1.5
+        cm = np.interp(m, [4.0, 7.0, 10.5], [0.50, 0.10, 0.022])
+        wgt = sol * (cm + (1 - cm) * e0n[iy, ix])
+        keep = rng.random(n) < wgt
+        out_x.append(x[keep]); out_y.append(y[keep]); out_m.append(m[keep]); got += keep.sum()
+    x = np.concatenate(out_x)[:N]; y = np.concatenate(out_y)[:N]; m = np.concatenate(out_m)[:N]
+    # a few clusters, loose and tight
+    for q in range(11):
+        cx = rng.random() * W; cy = rng.random() * YH * 0.9
+        ix = int(cx); iy = int(cy)
+        if e0n[iy, ix] < 0.25 or tau[iy, ix] > 1.2:
+            continue
+        nn = int(rng.integers(60, 260)); sg = rng.uniform(4, 13) * S
+        rr = np.abs(rng.standard_cauchy(nn)).clip(0, 6) * sg * 0.6
+        th = rng.random(nn) * 6.2832
+        x = np.concatenate([x, cx + rr * np.cos(th)]); y = np.concatenate([y, cy + rr * np.sin(th)])
+        m = np.concatenate([m, rng.uniform(7.2, 12.5, nn) ** 1.0])
+    n = x.size
+    ix = np.clip(x.astype(np.int32), 0, W - 1); iy = np.clip(y.astype(np.int32), 0, NS - 1)
+    # temperature: most are cool and faint; a few are hot and blaze
+    T = np.where(rng.random(n) < 0.72, rng.normal(4700, 750, n), rng.normal(6500, 1100, n))
+    hot = rng.random(n) < np.interp(m, [3, 8, 12], [0.30, 0.07, 0.02])
+    T = np.where(hot, 8000 + rng.exponential(5000, n), T)
+    giant = (~hot) & (m < 6.0) & (rng.random(n) < 0.35)
+    T = np.where(giant, rng.normal(4000, 350, n), T).clip(2900, 30000)
+    col = bb_rgb(T)
+    col = 1.0 + (col - 1.0) * 0.62           # hold the colour back
+    # dust in front of each star
+    behind = rng.random(n) < np.interp(m, [3, 6, 9.5], [0.25, 0.6, 0.93])
+    ts = taun[iy, ix] * behind * rng.random(n) ** 0.35 + (tau - taun)[iy, ix] * rng.random(n) ** 2.2 * behind
+    ext = np.exp(-ts[:, None] * np.array([0.80, 1.0, 1.22])[None, :])
+    fl = FREF * 10 ** (-0.4 * (m - 6.0))
+    col = col * ext
+    return x, y, fl, col, m
+
+
+# ---------------------------------------------------------------------
+#  air: extinction, airglow, the sky's own floor
+# ---------------------------------------------------------------------
+@njit(cache=True, fastmath=True, parallel=True)
+def air_pass(NSr, W, H, F, CPc, SPc, mw, st, out, EXPO):
+    Re = 6371.0
+    for j in prange(NSr):
+        for i in range(W):
+            dx, dy, dz = pix_dir(i + 0.5, j + 0.5, W, H, F, CPc, SPc)
+            sa = max(dz, 0.0)
+            adeg = math.asin(sa) * 57.29578
+            X = 1.0 / (sa + 0.50572 * (adeg + 6.07995) ** -1.6364)
+            t0 = math.exp(-0.050 * X); t1 = math.exp(-0.068 * X); t2 = math.exp(-0.100 * X)
+            c2 = 1.0 - sa * sa
+            # green line, 95 km
+            q = Re / (Re + 95.0)
+            V = 1.0 / math.sqrt(1.0 - q * q * c2)
+            tt = -Re * sa + math.sqrt(Re * Re * sa * sa + 2 * Re * 95.0 + 95.0 * 95.0)
+            gx = tt * dx; gy = tt * dy
+            wv = fbm2(gx / 420.0, gy / 420.0, 3, 61)
+            ph = (gx * 0.82 + gy * 0.57) / 58.0 + 4.5 * wv
+            bands = math.sin(6.2832 * ph)
+            ph2 = (gx * -0.35 + gy * 0.94) / 130.0 + 1.8 * fbm2(gx / 600.0 + 9.0, gy / 600.0, 2, 62)
+            bands2 = math.sin(6.2832 * ph2)
+            patch = fbm2(gx / 260.0 + 4.0, gy / 260.0 + 1.0, 4, 63)
+            grn = 0.0056 * V * (1.0 + 0.13 * bands * (0.5 + 0.5 * bands2) + 0.22 * bands2 + 0.60 * patch)
+            # red line, 250 km, broad
+            q2 = Re / (Re + 250.0)
+            V2 = 1.0 / math.sqrt(1.0 - q2 * q2 * c2)
+            t3 = -Re * sa + math.sqrt(Re * Re * sa * sa + 2 * Re * 250.0 + 250.0 * 250.0)
+            red = 0.0017 * V2 * (1.0 + 0.8 * fbm2(t3 * dx / 700.0, t3 * dy / 700.0 + 5.0, 3, 64))
+            bg = 0.0038 * (1.0 + 0.10 * V)
+            r = grn * 0.40 + red * 1.00 + bg * 0.36
+            g = grn * 1.00 + red * 0.40 + bg * 0.60
+            b = grn * 0.52 + red * 0.34 + bg * 1.00
+            # what the air removes it partly gives back, grey
+            m = (r + g + b) / 3.0
+            r = r * t0 + m * (1 - t0) * 0.50
+            g = g * t1 + m * (1 - t1) * 0.50
+            b = b * t2 + m * (1 - t2) * 0.46
+            out[j, i, 0] = (mw[j, i, 0] * EXPO + st[j, i, 0]) * t0 + r
+            out[j, i, 1] = (mw[j, i, 1] * EXPO + st[j, i, 1]) * t1 + g
+            out[j, i, 2] = (mw[j, i, 2] * EXPO + st[j, i, 2]) * t2 + b
+
+
+# ---------------------------------------------------------------------
+#  the far shore
+# ---------------------------------------------------------------------
+@njit(cache=True, fastmath=True)
+def terr(x, y, o):
+    r = math.sqrt(x * x + y * y)
+    az = math.atan2(x, y) * 57.29578
+    rs = 5200.0 + 11500.0 * sstep(-8.0, 30.0, az) + 900.0 * noise2(az * 0.11, 0.5, 40)
+    q = (r - rs) / 5200.0
+    if q <= 0.0:
+        return -1.0
+    env = 0.80 - 0.56 * sstep(-14.0, 26.0, az) + 0.10 * noise2(az * 0.07 + 3.0, 1.5, 41)
+    ramp = (1.0 - math.exp(-1.5 * q)) * sstep(0.0, 0.16, q)
+    base = rfbm2(x / 5600.0 + 2.3, y / 5600.0 + 0.7, o, 5)
+    big = 0.5 + 0.5 * noise2(x / 9000.0 + 5.0, y / 9000.0, 43)
+    mid = rfbm2(x / 1300.0 + 9.1, y / 1300.0 + 4.4, max(1, o - 2), 49)
+    return env * 1750.0 * ramp * (0.14 + 0.95 * base + 0.20 * (mid - 0.35)) * (0.72 + 0.5 * big) + 6.0 * q
+
+
+@njit(cache=True, fastmath=True, parallel=True)
+def terrain_pass(r0, r1, W, H, F, CPc, SPc, camh, tr, ta):
+    for j in prange(r0, r1):
+        for i in range(W):
+            acc0 = 0.0; acc1 = 0.0; acc2 = 0.0; cov = 0.0
+            for sj in range(2):
+                for si in range(2):
+                    dx, dy, dz = pix_dir(i + 0.25 + 0.5 * si, j + 0.25 + 0.5 * sj, W, H, F, CPc, SPc)
+                    hh = math.sqrt(dx * dx + dy * dy)
+                    hx = dx / hh; hy = dy / hh; tn = dz / hh
+                    rho = 4200.0; hit = False; prev = rho
+                    while rho < 70000.0:
+                        z = camh + rho * tn
+                        if z > 2300.0 or z < -2.0:
+                            break
+                        if terr(hx * rho, hy * rho, 5) > z:
+                            hit = True
+                            break
+                        prev = rho
+                        rho += max(14.0, 0.006 * rho)
+                    if not hit:
+                        continue
+                    lo = prev; hi = rho
+                    for it in range(8):
+                        mid = 0.5 * (lo + hi)
+                        if terr(hx * mid, hy * mid, 10) > camh + mid * tn: hi = mid
+                        else: lo = mid
+                    rho = hi
+                    px = hx * rho; py = hy * rho
+                    e = max(4.0, 0.0011 * rho)
+                    h0 = terr(px, py, 11)
+                    gxx = (terr(px + e, py, 11) - terr(px - e, py, 11)) / (2 * e)
+                    gyy = (terr(px, py + e, 11) - terr(px, py - e, 11)) / (2 * e)
+                    nz = 1.0 / math.sqrt(1.0 + gxx * gxx + gyy * gyy)
+                    # snow: caps, and what stays in the gullies
+                    hs = 560.0 + 240.0 * noise2(px / 2600.0, py / 2600.0, 44)
+                    cap = sstep(40.0, 330.0, h0 - hs)
+                    gl = rfbm2(px / 700.0, py / 700.0, 4, 45)
+                    stk = sstep(0.50, 0.22, gl) * sstep(-380.0, -60.0, h0 - hs)
+                    fine = 0.5 + 0.5 * noise2(px / 60.0, py / 60.0, 46)
+                    pat = sstep(0.22, 0.52, rfbm2(px / 420.0 + 3.0, py / 420.0, 5, 50))
+                    sn = max(cap * (0.35 + 0.65 * pat) * (0.6 + 0.4 * fine), 0.8 * stk) * sstep(0.55, 0.85, nz)
+                    amb = 0.30 + 0.70 * nz * nz
+                    # the slope that faces the lake sees the sky behind me
+                    fc = max(0.0, -(gxx * hx + gyy * hy) * nz)
+                    amb *= 0.75 + 0.5 * fc
+                    rk = 0.8 + 0.35 * noise2(px / 900.0, py / 300.0, 47) + 0.2 * noise2(px / 90.0, py / 90.0, 48)
+                    c0 = (0.0025 * rk * (1 - sn) + 0.0135 * sn) * amb
+                    c1 = (0.0028 * rk * (1 - sn) + 0.0160 * sn) * amb
+                    c2 = (0.0034 * rk * (1 - sn) + 0.0205 * sn) * amb
+                    hz = 1.0 - math.exp(-rho / 60000.0)
+                    c0 = c0 * (1 - hz) + 0.012 * hz; c1 = c1 * (1 - hz) + 0.016 * hz; c2 = c2 * (1 - hz) + 0.017 * hz
+                    acc0 += c0; acc1 += c1; acc2 += c2; cov += 1.0
+            if cov > 0:
+                tr[j - r0, i, 0] = acc0 / cov; tr[j - r0, i, 1] = acc1 / cov; tr[j - r0, i, 2] = acc2 / cov
+            ta[j - r0, i] = cov * 0.25
+
+
+# ---------------------------------------------------------------------
+#  the near shore: the rock I am standing on, and its neighbours
+# ---------------------------------------------------------------------
+@njit(cache=True, fastmath=True)
+def shore_y(x):
+    return 3.95 + 0.40 * noise2(x * 0.45, 0.3, 70) + 0.15 * noise2(x * 1.7, 2.3, 71) + 1.25 * sstep(-1.2, -3.2, x) \
+        + 0.35 * sstep(2.4, 3.8, x)
+
+
+@njit(cache=True, fastmath=True)
+def near_h(x, y):
+    """Height above the water, metres: shingle, cobbles, a few low slabs standing in the shallows."""
+    ys = shore_y(x)
+    g = 0.11 * (ys - y)
+    if g > 0.0:
+        g = 0.11 * (ys - y) ** 0.8
+    g += 0.006 * noise2(x * 9.0, y * 9.0, 72) + 0.02 * noise2(x * 2.1, y * 2.1, 73)
+    best = g
+    for lev in range(3):
+        c = 1.5
+        if lev == 1: c = 0.38
+        if lev == 2: c = 0.115
+        cx = math.floor(x / c); cy = math.floor(y / c)
+        for oy in range(-1, 2):
+            for ox in range(-1, 2):
+                ix = int(cx) + ox; iy = int(cy) + oy
+                h1 = _h3(ix, iy, lev, 80)
+                bx = (ix + 0.2 + 0.6 * _h3(ix, iy, lev, 81)) * c
+                by = (iy + 0.2 + 0.6 * _h3(ix, iy, lev, 82)) * c
+                out = by - shore_y(bx)
+                if lev == 0:
+                    if out > 3.4: continue
+                    p = 0.46 - 0.09 * max(0.0, out)
+                    if bx < -1.0 and out < 1.6: p += 0.3
+                elif lev == 1:
+                    p = 0.80 - 1.1 * max(0.0, out)
+                else:
+                    p = 0.9 - 4.0 * max(0.0, out + 0.1)
+                if h1 > p:
+                    continue
+                rad = c * (0.24 + 0.20 * _h3(ix, iy, lev, 83))
+                ang = 3.1416 * _h3(ix, iy, lev, 84)
+                ca = math.cos(ang); sa = math.sin(ang)
+                ddx = x - bx; ddy = y - by
+                ex = (ddx * ca + ddy * sa) / (rad * 1.3); ey = (-ddx * sa + ddy * ca) / (rad * 0.82)
+                d2 = ex * ex + ey * ey
+                d2 *= 1.0 + 0.42 * noise2(x * 2.2 / c + ix, y * 2.2 / c + iy, 85) + 0.2 * noise2(x * 6.0 / c, y * 6.0 / c + iy, 91)
+                if d2 >= 1.0:
+                    continue
+                if lev == 0:
+                    hh = rad * (0.30 + 0.40 * _h3(ix, iy, lev, 86))
+                else:
+                    hh = rad * (0.50 + 0.50 * _h3(ix, iy, lev, 86))
+                gb = 0.11 * (shore_y(bx) - by)
+                top = gb - 0.30 * hh + hh * (1.0 - d2 ** 1.5) ** 0.5
+                top += 0.010 * c * noise2(x * 11.0 / c, y * 11.0 / c, 87)
+                if top > best:
+                    best = top
+    return best
+
+
+GX0 = -9.5; GY0 = 2.5; GX1 = 9.5; GY1 = 9.2
+
+
+@njit(cache=True, fastmath=True, parallel=True)
+def near_grid(cell, hg):
+    for j in prange(hg.shape[0]):
+        for i in range(hg.shape[1]):
+            hg[j, i] = near_h(GX0 + i * cell, GY0 + j * cell)
+
+
+@njit(cache=True, fastmath=True, inline='always')
+def gh(hg, cell, x, y):
+    fx = (x - GX0) / cell; fy = (y - GY0) / cell
+    if fx < 0.0 or fy < 0.0 or fx >= hg.shape[1] - 1.001 or fy >= hg.shape[0] - 1.001:
+        return -1.0
+    x0 = int(fx); y0 = int(fy); tx = fx - x0; ty = fy - y0
+    return (hg[y0, x0] * (1 - tx) + hg[y0, x0 + 1] * tx) * (1 - ty) + (hg[y0 + 1, x0] * (1 - tx) + hg[y0 + 1, x0 + 1] * tx) * ty
+
+
+@njit(cache=True, fastmath=True)
+def rock_shade(hg, cell, x, y):
+    e = 2.0 * cell
+    h0 = gh(hg, cell, x, y)
+    gx = (gh(hg, cell, x + e, y) - gh(hg, cell, x - e, y)) / (2 * e)
+    gy = (gh(hg, cell, x, y + e) - gh(hg, cell, x, y - e)) / (2 * e)
+    nz = 1.0 / math.sqrt(1.0 + gx * gx + gy * gy)
+    occ = 0.0
+    for q in range(8):
+        an = q * 0.7854 + 0.3
+        rr = 0.07 if q % 2 == 0 else 0.22
+        ha = gh(hg, cell, x + rr * math.cos(an), y + rr * math.sin(an))
+        occ += max(0.0, min(1.0, (ha - h0) / rr))
+    ao = 1.0 - 0.85 * occ / 8.0
+    amb = (0.10 + 0.90 * nz ** 1.8) * ao * ao
+    # the side that faces the lake faces the galaxy
+    amb *= 1.0 + 1.1 * max(0.0, -gy * nz)
+    alb = 0.95 + 0.40 * noise2(x * 1.9, y * 1.9, 88) + 0.22 * noise2(x * 23.0, y * 23.0, 89) + 0.16 * noise2(x * 71.0, y * 71.0, 90)
+    alb *= 1.0 - 0.6 * sstep(0.06, 0.008, h0)
+    return amb * alb
+
+
+@njit(cache=True, fastmath=True, parallel=True)
+def near_pass(r0, H, W, F, CPc, SPc, camh, hg, cell, fg, fa, occ):
+    HM = 0.70
+    for j in prange(r0, H):
+        for i in range(W):
+            a = 0.0; cov = 0.0; oc = 0.0
+            for sj in range(2):
+                for si in range(2):
+                    dx, dy, dz = pix_dir(i + 0.25 + 0.5 * si, j + 0.25 + 0.5 * sj, W, H, F, CPc, SPc)
+                    if dz >= -0.02:
+                        continue
+                    Dw = camh / -dz
+                    t0 = max(GY0 / dy, Dw * (1.0 - HM / camh)); t1 = min(Dw, GY1 / dy)
+                    hit = False; t = t0
+                    if t0 < t1:
+                        prev = t0
+                        while t < t1:
+                            if gh(hg, cell, dx * t, dy * t) > camh + dz * t:
+                                hit = True
+                                break
+                            prev = t
+                            t += 0.004 + 0.0015 * t
+                        if hit:
+                            lo = prev; hi = t
+                            for it in range(6):
+                                mid = 0.5 * (lo + hi)
+                                if gh(hg, cell, dx * mid, dy * mid) > camh + dz * mid: hi = mid
+                                else: lo = mid
+                            t = hi
+                    if hit:
+                        a += rock_shade(hg, cell, dx * t, dy * t); cov += 1.0
+                    elif dy * Dw < GY1:
+                        # water: does the mirror see a stone before it sees the sky?
+                        wx = dx * Dw; wy = dy * Dw
+                        if gh(hg, cell, wx, wy) > 0.0:
+                            a += rock_shade(hg, cell, wx, wy); cov += 1.0
+                            continue
+                        tt = 0.01
+                        while tt < 5.0:
+                            zz = -dz * tt
+                            if zz > HM or wy + dy * tt > GY1:
+                                break
+                            if gh(hg, cell, wx + dx * tt, wy + dy * tt) > zz:
+                                oc += 1.0
+                                break
+                            tt += 0.006 + 0.01 * tt
+            fg[j - r0, i] = a / cov if cov > 0 else 0.0
+            fa[j - r0, i] = cov * 0.25
+            occ[j - r0, i] = oc * 0.25
+
+
+# ---------------------------------------------------------------------
+#  the water
+# ---------------------------------------------------------------------
+@njit(cache=True, fastmath=True, inline='always')
+def bil(img, fx, fy, c):
+    Hh = img.shape[0]; Ww = img.shape[1]
+    if fx < 0.0: fx = 0.0
+    if fx > Ww - 1.001: fx = Ww - 1.001
+    if fy < 0.0: fy = 0.0
+    if fy > Hh - 1.001: fy = Hh - 1.001
+    x0 = int(fx); y0 = int(fy)
+    tx = fx - x0; ty = fy - y0
+    return (img[y0, x0, c] * (1 - tx) + img[y0, x0 + 1, c] * tx) * (1 - ty) + \
+           (img[y0 + 1, x0, c] * (1 - tx) + img[y0 + 1, x0 + 1, c] * tx) * ty
+
+
+@njit(cache=True, fastmath=True, parallel=True)
+def water_pass(r0, H, W, F, CPc, SPc, camh, U, UB, TP, tp_r0, yws, xt, Sc, out):
+    K = 18
+    yh = 0.5 * H + F * SPc / CPc
+    for j in prange(r0, H):
+        for i in range(W):
+            dx, dy, dz = pix_dir(i + 0.5, j + 0.5, W, H, F, CPc, SPc)
+            if dz > -1e-5:
+                dz = -1e-5
+            e = math.asin(-dz)
+            Dw = camh / -dz
+            wx = dx * Dw; wy = dy * Dw
+            hh = math.sqrt(dx * dx + dy * dy); hx = dx / hh; hy = dy / hh
+            lw = math.log(Dw)
+            az = math.atan2(dx, dy)
+            # long slow ripples
+            fade = sstep(90.0, 14.0, Dw)
+            sw = 0.0030 * fade * (noise2(wx * 0.55 + 0.3 * wy, wy * 0.21, 110) + 0.5 * noise2(wx * 1.4, wy * 0.6 + 3.0, 111))
+            sw += 0.0011 * fade * noise2(wx * 4.0, wy * 2.2, 112)
+            # where a little wind touches down
+            pn = fbm2(az * 2.6 + 2.0, lw * 7.5 + 1.0, 4, 113)
+            wp = 0.75 * sstep(0.20, 0.44, pn + 0.06 * sstep(2.6, 5.5, lw))
+            pn2 = fbm2(az * 9.0 + 5.0, lw * 22.0, 3, 114)
+            wp = max(wp, 0.8 * sstep(0.22, 0.45, pn2) * sstep(3.0, 5.0, lw))
+            sig = 0.0006 + 0.0006 * (1.0 - fade) + 0.004 * wp
+            sigp = 0.020
+            jit = _h3(i, j, 7, 5)
+            c0 = 0.0; c1 = 0.0; c2 = 0.0
+            p0 = 0.0; p1 = 0.0; p2 = 0.0
+            for k in range(K):
+                qv = (k + jit) / K
+                if qv < 0.03: qv = 0.03
+                if qv > 0.97: qv = 0.97
+                g = 0.55 * math.log(qv / (1.0 - qv))
+                ar = abs(e * 1.0 + 2.0 * (sw + sig * g))
+                ca = math.cos(ar); sa = math.sin(ar)
+                rx = hx * ca; ry = hy * ca; rz = sa
+                t = ry * CPc + rz * SPc
+                fx = 0.5 * W + F * rx / t - 0.5
+                fy = 0.5 * H - F * (-ry * SPc + rz * CPc) / t - 0.5
+                s0 = bil(U, fx, fy, 0); s1 = bil(U, fx, fy, 1); s2 = bil(U, fx, fy, 2)
+                # the spit and the tent, mirrored in their own waterline
+                ym = 2.0 * yws - (j + 0.5) - 2.0 * (sw + sig * g) * F - tp_r0
+                if ym >= 0.0 and ym < TP.shape[0] - 1.0:
+                    al = bil(TP, float(i), ym, 3)
+                    s0 = s0 * (1 - al) + bil(TP, float(i), ym, 0)
+                    s1 = s1 * (1 - al) + bil(TP, float(i), ym, 1)
+                    s2 = s2 * (1 - al) + bil(TP, float(i), ym, 2)
+                c0 += s0; c1 += s1; c2 += s2
+                if wp > 0.01:
+                    ar = abs(e + 2.0 * (sw + sigp * g) + 0.02)
+                    ca = math.cos(ar); sa = math.sin(ar)
+                    rx = hx * ca; ry = hy * ca; rz = sa
+                    t = ry * CPc + rz * SPc
+                    fx = 0.5 * W + F * rx / t - 0.5
+                    fy = 0.5 * H - F * (-ry * SPc + rz * CPc) / t - 0.5
+                    p0 += bil(UB, fx, fy, 0); p1 += bil(UB, fx, fy, 1); p2 += bil(UB, fx, fy, 2)
+            c0 /= K; c1 /= K; c2 /= K
+            if wp > 0.01:
+                c0 = c0 * (1 - wp) + wp * p0 / K; c1 = c1 * (1 - wp) + wp * p1 / K; c2 = c2 * (1 - wp) + wp * p2 / K
+            Rf = 0.07 + 0.93 * (1.0 - math.sin(e)) ** 3.4
+            Rf *= 0.80
+            # the tent's path on the water
+            ddy = (j + 0.5 - yws) / Sc
+            if ddy > 0.0:
+                ddx = (i + 0.5 - xt) / Sc
+                wdt = 5.5 + 0.035 * ddy
+                gl = math.exp(-(ddx / wdt) ** 2) * (math.exp(-ddy / 26.0) * 0.8 + 0.30 * math.exp(-ddy / 95.0))
+                if gl > 1e-4:
+                    rp = 0.5 + 0.5 * noise2(i / (7.0 * Sc) + 0.4 * noise2(j / (3.0 * Sc), 1.0, 116), j / (1.7 * Sc), 115)
+                    rp = rp * rp * (3 - 2 * rp)
+                    gl *= (0.25 + 1.5 * rp * rp) * sstep(0.0, 5.0, ddy)
+                    c0 += 1.25 * gl; c1 += 0.50 * gl; c2 += 0.10 * gl
+            dp = 1.0 - Rf
+            out[j, i, 0] = c0 * Rf + 0.0016 * dp
+            out[j, i, 1] = c1 * Rf + 0.0026 * dp
+            out[j, i, 2] = c2 * Rf + 0.0036 * dp
+
+
+# ---------------------------------------------------------------------
+#  one human light
+# ---------------------------------------------------------------------
+def tent_patch(xt):
+    """The spit and the tent, premultiplied RGBA, rows from tp_r0 down to the spit's waterline."""
+    ss = 4
+    top = YH - 26 * S; yws = YH + 8.5 * S
+    r0 = int(math.floor(top)); r1 = int(math.ceil(yws)) + 1
+    hh = (r1 - r0) * ss; ww = W * ss
+    yy = (np.arange(hh) + 0.5) / ss + r0
+    xx = (np.arange(ww) + 0.5) / ss
+    Xg, Yg = np.meshgrid(xx, yy)
+    rng = np.random.default_rng(SEED + 5)
+    # the spit: low gravel, comes in from the left, ends a little past the tent
+    tip = xt + 150 * S
+    bump = np.interp(xx, np.linspace(0, W, 240), gaussian_filter(rng.normal(0, 1, 240), 2.0)) * 1.3 * S
+    fine = np.interp(xx, np.linspace(0, W, 2400), gaussian_filter(rng.normal(0, 1, 2400), 1.2)) * 0.5 * S
+    thick = (4.6 * S + bump + fine) * np.clip((tip - xx) / (260 * S), 0, 1) ** 0.6
+    ytop = yws - np.maximum(thick, 0)
+    spit = ((Yg >= ytop[None, :]) & (Yg <= yws) & (thick[None, :] > 0.05)).astype(np.float32)
+    dxs = (Xg - xt) / S
+    lit = 1.0 / (1.0 + (np.abs(dxs) / 9.0) ** 2.2)
+    lit *= np.where(np.abs(dxs) < 9.5, 0.25, 1.0)             # the tent's own floor shades the middle
+    rgb = np.zeros((hh, ww, 3), np.float32)
+    grav = 0.8 + 0.4 * rng.random((hh, ww)).astype(np.float32)
+    for c, (dk, wm) in enumerate(zip((0.0030, 0.0034, 0.0040), (0.42, 0.16, 0.035))):
+        rgb[..., c] = spit * (dk + wm * lit * grav * np.clip((yws - Yg) / (4 * S), 0.25, 1))
+    alpha = spit.copy()
+    # the tent: a low dome, lamp inside near the floor
+    base = np.interp(xt, xx, ytop) + 0.6 * S
+    tw = 9.0 * S; th = 10.5 * S
+    ex = (Xg - xt) / tw; ey = (base - Yg) / th
+    dome = (ey >= 0) & ((np.abs(ex) ** 2.3 + np.maximum(ey, 0) ** 1.9) <= 1.0)
+    lamp = np.exp(-((ex + 0.15) / 0.55) ** 2 - ((ey - 0.22) / 0.55) ** 2)
+    glow = 0.42 + 1.25 * lamp
+    seam = 1.0 - 0.38 * np.exp(-((np.abs(ex + 0.05) - 0.50 * (1 - ey * 0.9)) / 0.07) ** 2)
+    door = 1.0 - 0.30 * ((ex > 0.52) & (ey < 0.6))
+    edge = np.clip((1.0 - (np.abs(ex) ** 2.3 + np.maximum(ey, 0) ** 1.9)) / 0.22, 0.35, 1)
+    em = (glow * seam * door * edge * dome).astype(np.float32)
+    tcol = np.array([2.6, 1.02, 0.20], np.float32)
+    for c in range(3):
+        rgb[..., c] = np.where(dome, em * tcol[c], rgb[..., c])
+    alpha = np.maximum(alpha, dome.astype(np.float32))
+    rgba = np.concatenate([rgb, alpha[..., None]], -1)
+    rgba = rgba.reshape(r1 - r0, ss, W, ss, 4).mean((1, 3))
+    return rgba.astype(np.float32), r0, yws, base
+
+
+# ---------------------------------------------------------------------
+#  signature: a compass-drawn star and the altitude
+# ---------------------------------------------------------------------
+def sign(im8):
+    ss = 4
+    bw = int(250 * S) + 8; bh = int(74 * S) + 8
+    ov = Image.new('L', (bw * ss, bh * ss), 0)
+    d = ImageDraw.Draw(ov)
+    R = 24 * S * ss; cx = 34 * S * ss; cy = bh * ss / 2
+    lw = max(2, int(round(1.5 * S * ss)))
+    d.ellipse([cx - R, cy - R, cx + R, cy + R], outline=95, width=max(1, lw // 2))
+    pts = [(cx + R * math.cos(-math.pi / 2 + k * math.pi / 4), cy + R * math.sin(-math.pi / 2 + k * math.pi / 4)) for k in range(8)]
+    for k in range(8):
+        d.line([pts[k], pts[(k + 3) % 8]], fill=255, width=lw)
+    d.ellipse([cx - lw, cy - lw, cx + lw, cy + lw], fill=255)
+    glyph = {
+        '4': [[(0.72, 1.6), (0.72, 0.0), (0.0, 1.08), (1.0, 1.08)]],
+        '5': [[(0.9, 0.0), (0.17, 0.0), (0.1, 0.72), (0.5, 0.62), (0.85, 0.82), (0.92, 1.15), (0.7, 1.5), (0.4, 1.6), (0.08, 1.45)]],
+        '2': [[(0.08, 0.38), (0.25, 0.08), (0.55, 0.0), (0.82, 0.14), (0.9, 0.45), (0.72, 0.8), (0.05, 1.6), (0.98, 1.6)]],
+        'm': [[(0.0, 1.6), (0.0, 0.72)], [(0.0, 0.98), (0.22, 0.74), (0.48, 0.80), (0.56, 1.0), (0.56, 1.6)],
+              [(0.56, 0.98), (0.78, 0.74), (1.04, 0.80), (1.12, 1.0), (1.12, 1.6)]],
+    }
+    sc = 15 * S * ss; x = cx + R + 20 * S * ss; y0 = cy - 0.8 * sc
+    for ch in '4522 m':
+        if ch == ' ':
+            x += 0.6 * sc; continue
+        for line in glyph[ch]:
+            d.line([(x + px * sc, y0 + py * sc) for px, py in line], fill=235, width=lw, joint='curve')
+        x += (1.55 if ch != 'm' else 1.3) * sc
+    ov = ov.resize((bw, bh), Image.LANCZOS)
+    a = np.asarray(ov, np.float32) / 255.0 * 0.50
+    x0 = int(58 * S); y0 = H - bh - int(46 * S)
+    reg = im8[y0:y0 + bh, x0:x0 + bw].astype(np.float32)
+    ink = np.array([176, 166, 148], np.float32)
+    im8[y0:y0 + bh, x0:x0 + bw] = (reg * (1 - a[..., None]) + ink * a[..., None]).round().astype(np.uint8)
+    return (x0 + int(34 * S), y0 + bh // 2)
+
+
+def galactic_to_pixel(ldeg, bdeg):
+    l = ldeg * D2R; b = bdeg * D2R
+    g = np.array([math.cos(b) * math.cos(l), math.cos(b) * math.sin(l), math.sin(b)])
+    d = GAL.T @ g
+    t = d[1] * CP + d[2] * SP
+    return W / 2 + F * d[0] / t, H / 2 - F * (-d[1] * SP + d[2] * CP) / t
+
+
+# ---------------------------------------------------------------------
+def main():
+    T0 = time.time()
+    here = os.path.dirname(os.path.abspath(__file__))
+    stem = os.path.splitext(os.path.basename(__file__))[0]
+    outp = os.path.join(here, stem + ('.png' if S == 1.0 else '_study.png'))
+    rng = np.random.default_rng(SEED)
+
+    def tick(msg):
+        print(f'{time.time() - T0:6.1f}s  {msg}', flush=True)
+
+    # --- galaxy
+    NEB = np.array([[6.2, -1.3, 0.75, 9.0], [7.3, -0.2, 0.45, 6.0], [16.9, -0.8, 0.50, 6.5], [15.2, -0.7, 0.35, 5.0],
+                    [-7.0, 0.9, 0.80, 5.0], [-8.6, -0.4, 0.5, 3.5], [28.5, -0.3, 0.45, 3.5], [-23.5, -0.6, 0.7, 3.5],
+                    [41.0, 0.4, 0.5, 2.5], [-14.5, 1.2, 0.45, 3.0]])
+    mw = np.zeros((NS, W, 3), np.float32); e0 = np.zeros((NS, W), np.float32)
+    tau = np.zeros((NS, W), np.float32); taun = np.zeros((NS, W), np.float32)
+    sky_pass(NS, W, H, F, CP, SP, GAL, SK, AK, FK, OK, BK, HK, TK, ROPE, NEB, mw, e0, tau, taun)
+    tick('galaxy')
+
+    # --- stars
+    x, y, fl, col, m = make_stars(e0, tau, taun, rng)
+    # the one that is not in the sky
+    el, eb = rope_centre(0, 0.47)
+    ex, ey = galactic_to_pixel(el, eb)
+    x = np.append(x, ex); y = np.append(y, ey); fl = np.append(fl, FREF * 10 ** (-0.4 * (3.3 - 6.0)))
+    col = np.vstack([col, 1.0 + (bb_rgb(np.array([5300.0])) - 1.0) * 0.62])
+    st = np.zeros((NS, W, 3), np.float32)
+    order = np.argsort(y, kind='stable')
+    splat(st, x[order], y[order], (fl * S * S)[order], col[order].astype(np.float64), max(S, 0.35))
+    tick(f'{x.size} stars; the extra one at ({ex / S:.0f}, {ey / S:.0f}) in full-size pixels')
+
+    # --- air
+    sky = np.zeros((NS, W, 3), np.float32)
+    air_pass(NS, W, H, F, CP, SP, mw, st, sky, 0.040)
+    del mw, st
+    tick('air')
+    if os.environ.get('DOLKAR_SKY'):
+        t = sky[:int(YH)]; t = t * (1 + t / 16.0) / (1 + t)
+        t = np.where(t <= 0.0031308, 12.92 * t, 1.055 * np.maximum(t, 1e-9) ** (1 / 2.4) - 0.055)
+        Image.fromarray((t.clip(0, 1) * 255).astype(np.uint8)).save(os.path.join(os.environ['DOLKAR_SKY'], 'sky.png'))
+        return
+
+    # --- far shore
+    r0 = int(YH - 300 * S); r1 = NS
+    tr = np.zeros((r1 - r0, W, 3), np.float32); ta = np.zeros((r1 - r0, W), np.float32)
+    terrain_pass(r0, r1, W, H, F, CP, SP, CAMH, tr, ta)
+    U = sky
+    U[r0:r1] = U[r0:r1] * (1 - ta[..., None]) + tr * ta[..., None]
+    tick('far shore')
+
+    # --- tent
+    xt = 0.295 * W
+    TP, tp_r0, yws, tbase = tent_patch(xt)
+    # glow in the cold air round the tent, very little
+    yy, xx = np.mgrid[0:NS, 0:W]
+    d2 = ((xx - xt) ** 2 + (yy - (tbase - 5 * S)) ** 2) / (S * S)
+    halo = (0.050 * np.exp(-d2 / (2 * 7.0 ** 2)) + 0.010 * np.exp(-d2 / (2 * 22.0 ** 2)) + 0.0022 / (1 + d2 / 60.0 ** 2) ** 1.5).astype(np.float32)
+    del d2, xx, yy
+    for c, k in enumerate((1.0, 0.42, 0.10)):
+        U[..., c] += halo * k
+    UB = np.stack([gaussian_filter(U[..., c], 7 * S) for c in range(3)], -1)
+    tick('tent')
+
+    # --- water
+    img = np.zeros((H, W, 3), np.float32)
+    img[:NS] = U
+    wr0 = int(math.floor(YH))
+    water_pass(wr0, H, W, F, CP, SP, CAMH, U, UB, TP, tp_r0, yws, xt, S, img)
+    # the hard edge at the far shore is half a pixel of each
+    fr = YH - wr0
+    img[wr0] = U[wr0] * fr + img[wr0] * (1 - fr)
+    # spit and tent over the top
+    n = TP.shape[0]
+    img[tp_r0:tp_r0 + n] = img[tp_r0:tp_r0 + n] * (1 - TP[..., 3:4]) + TP[..., :3]
+    tick('water')
+
+    # --- near shore
+    nr0 = int(YH + 0.30 * (H - YH))
+    fg = np.zeros((H - nr0, W), np.float32); fa = np.zeros((H - nr0, W), np.float32); oc = np.zeros((H - nr0, W), np.float32)
+    cell = 0.004 / max(S, 0.4)
+    hg = np.zeros((int((GY1 - GY0) / cell) + 1, int((GX1 - GX0) / cell) + 1), np.float32)
+    near_grid(cell, hg)
+    near_pass(nr0, H, W, F, CP, SP, CAMH, hg, cell, fg, fa, oc)
+    rockc = np.array([0.0066, 0.0075, 0.0092], np.float32)
+    sub = img[nr0:]
+    sub *= (1 - 0.93 * oc[..., None])
+    sub += oc[..., None] * rockc * 0.10
+    sub[:] = sub * (1 - fa[..., None]) + fg[..., None] * rockc * fa[..., None]
+    tick('near shore')
+
+    # --- the print
+    # a breath of glow, the way an eye gives it
+    for c in range(3):
+        g1 = gaussian_filter(img[..., c], 3.0 * S); g2 = gaussian_filter(img[..., c], 24.0 * S)
+        img[..., c] = img[..., c] * 0.90 + g1 * 0.055 + g2 * 0.045
+    # hold the colour back from what a camera would give
+    lum = img @ np.array([0.2126, 0.7152, 0.0722], np.float32)
+    img = lum[..., None] + (img - lum[..., None]) * 1.0
+    img = np.maximum(img, 0)
+    img = 1.5 * img ** 1.14
+    img = img * (1 + img / 16.0) / (1 + img)
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    vig = 1.0 - 0.16 * (((xx - W / 2) / (W / 2)) ** 2 + ((yy - 0.55 * H) / (H / 2)) ** 2) ** 1.2 * 0.5
+    img *= vig[..., None]
+    img += np.array([0.0007, 0.0009, 0.0013], np.float32)
+    out = np.where(img <= 0.0031308, 12.92 * img, 1.055 * np.maximum(img, 1e-9) ** (1 / 2.4) - 0.055)
+    # a very fine grain, so the blacks are full of something
+    g = rng.normal(0, 1, (H, W)).astype(np.float32)
+    g = g * 0.8 + gaussian_filter(g, 0.8) * 0.9
+    out += g[..., None] * 0.0052 + rng.normal(0, 0.0022, (H, W, 3)).astype(np.float32)
+    out8 = (out.clip(0, 1) * 255 + rng.random((H, W, 3)).astype(np.float32)).clip(0, 255).astype(np.uint8)
+    sx, sy = sign(out8)
+    Image.fromarray(out8).save(outp, optimize=True)
+    tick(f'saved {outp}  {W}x{H}; signature at ({sx}, {sy})')
+
+
+if __name__ == '__main__':
+    main()

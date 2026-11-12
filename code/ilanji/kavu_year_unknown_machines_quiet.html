@@ -1,0 +1,1456 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Code: Kavu, year unknown, the machines have gone quiet | Antara</title>
+<meta name="description" content="The program that computes Kavu, year unknown, the machines have gone quiet by Ilanji.">
+<meta property="og:title" content="Code: Kavu, year unknown, the machines have gone quiet | Antara">
+<meta property="og:description" content="The program that computes Kavu, year unknown, the machines have gone quiet by Ilanji.">
+
+<meta name="theme-color" content="#0E0E0D">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Marcellus&family=Albert+Sans:ital,wght@0,300;0,400;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../style.css">
+<link rel="icon" href="../../mark.svg" type="image/svg+xml">
+</head>
+<body class="plain">
+<header class="top">
+  <a class="mark" href="../../">Antara</a>
+  <nav><a href="../../">Walk the gallery</a><a href="../../works/">All works</a><a href="../../about/">About</a></nav>
+</header>
+<main>
+<section class="lead"><h1>Kavu, year unknown, the machines have gone quiet</h1>
+<p class="dates">Ilanji. The whole program that computes this picture: 1,425 lines of Python.</p>
+<p><a href="../../works/#kavu-year-unknown-machines-quiet">Back to the work</a>. <a href="kavu_year_unknown_machines_quiet.py" download>Download the .py file</a></p></section>
+<pre class="src">#!/usr/bin/env python3
+&quot;&quot;&quot;
+Kavu, year unknown, the machines have gone quiet
+
+    python kavu_year_unknown_machines_quiet.py            # the picture, 3000 x 2250
+    python kavu_year_unknown_machines_quiet.py 0.5        # a study at half size
+
+Needs numpy, scipy, numba, pillow.  Nothing else goes in.
+&quot;&quot;&quot;
+import sys, math, time
+import numpy as np
+from numba import njit, prange
+from scipy.ndimage import gaussian_filter
+from scipy.interpolate import CubicSpline
+from PIL import Image
+
+# =====================================================================
+#  THE BRUSH
+#  A stroke is four decisions: direction, load, pressure, and where it
+#  runs dry.  Everything below is those four, written down.
+# =====================================================================
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def _stroke(col, hgt, tooth, sx, sy, n, r, c0, sv, bl, bc, bend,
+            opac, thick, dry, drysens, pickup, edge, ridge):
+    H = hgt.shape[0]; W = hgt.shape[1]
+    nb = bl.shape[0]
+    seg = np.empty(n); cum = np.empty(n); cum[0] = 0.0
+    minx = 1e9; maxx = -1e9; miny = 1e9; maxy = -1e9
+    for i in range(n):
+        if sx[i] &lt; minx: minx = sx[i]
+        if sx[i] &gt; maxx: maxx = sx[i]
+        if sy[i] &lt; miny: miny = sy[i]
+        if sy[i] &gt; maxy: maxy = sy[i]
+        if i &lt; n - 1:
+            dx = sx[i + 1] - sx[i]; dy = sy[i + 1] - sy[i]
+            seg[i] = math.sqrt(dx * dx + dy * dy) + 1e-6
+            cum[i + 1] = cum[i] + seg[i]
+    L = cum[n - 1] + 1e-6
+    # the brush picks up what is already wet on the canvas as it travels;
+    # pigments meet as pigments (log mix), not as light
+    cs = np.empty((n, 3))
+    cur0 = c0[0]; cur1 = c0[1]; cur2 = c0[2]
+    for i in range(n):
+        if pickup &gt; 0.0 and i &gt; 0:
+            xi = int(sx[i]); yi = int(sy[i])
+            if xi &gt;= 0 and xi &lt; W and yi &gt;= 0 and yi &lt; H:
+                cur0 = math.exp((1 - pickup) * math.log(max(cur0, 0.004)) + pickup * math.log(max(col[yi, xi, 0], 0.004)))
+                cur1 = math.exp((1 - pickup) * math.log(max(cur1, 0.004)) + pickup * math.log(max(col[yi, xi, 1], 0.004)))
+                cur2 = math.exp((1 - pickup) * math.log(max(cur2, 0.004)) + pickup * math.log(max(col[yi, xi, 2], 0.004)))
+        cs[i, 0] = cur0; cs[i, 1] = cur1; cs[i, 2] = cur2
+    x0 = max(0, int(minx - r - 2)); x1 = min(W, int(maxx + r + 3))
+    y0 = max(0, int(miny - r - 2)); y1 = min(H, int(maxy + r + 3))
+    rr = r * r * 1.1
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            best = 1e18; bi = 0; bt = 0.0; cr = 0.0
+            for i in range(n - 1):
+                ax = x - sx[i]; ay = y - sy[i]
+                bx = sx[i + 1] - sx[i]; by = sy[i + 1] - sy[i]
+                t = (ax * bx + ay * by) / (seg[i] * seg[i])
+                if t &lt; 0.0: t = 0.0
+                elif t &gt; 1.0: t = 1.0
+                ex = ax - t * bx; ey = ay - t * by
+                d2 = ex * ex + ey * ey
+                if d2 &lt; best:
+                    best = d2; bi = i; bt = t; cr = bx * ay - by * ax
+            if best &gt; rr:
+                continue
+            tau = (cum[bi] + bt * seg[bi]) / L
+            wf = 0.93 + 0.07 * math.sin(3.14159 * min(1.0, 0.12 + tau))   # a flat brush: the width barely changes
+            dd = math.sqrt(best); over = 0.0
+            if bi == 0 and bt &lt;= 0.0:                                     # beyond the heel of the stroke
+                over = -((x - sx[0]) * (sx[1] - sx[0]) + (y - sy[0]) * (sy[1] - sy[0])) / seg[0]
+                dd = abs(cr) / seg[0]
+            elif bi == n - 2 and bt &gt;= 1.0:                               # beyond the toe
+                over = ((x - sx[n - 1]) * (sx[n - 1] - sx[n - 2]) + (y - sy[n - 1]) * (sy[n - 1] - sy[n - 2])) / seg[n - 2]
+                dd = abs(cr) / seg[n - 2]
+            q = dd / (r * wf)
+            if q &gt;= 1.0:
+                continue
+            e = 1.0
+            if q &gt; 1.0 - edge:
+                e = (1.0 - q) / edge
+                e = e * e * (3 - 2 * e)
+            if cr &lt; 0: sq = -q
+            else: sq = q
+            k = int((sq * 0.5 + 0.5) * (nb - 1) + 0.5)
+            if k &lt; 0: k = 0
+            if k &gt;= nb: k = nb - 1
+            if over &gt; r * 0.5 * (bl[k] - 0.5):                            # square end, ragged by the bristles
+                continue
+            # each bristle lifts off at its own moment
+            ce = (1.0 - bend[k] - tau) / 0.05
+            if ce &lt;= 0.0: continue
+            if ce &gt; 1.0: ce = 1.0
+            cb = (tau + 0.02 - 0.3 * bend[nb - 1 - k]) / 0.04
+            if cb &lt;= 0.0: continue
+            if cb &gt; 1.0: cb = 1.0
+            # the load runs out; a dry brush only touches the tops of the weave
+            avail = bl[k] * (1.0 - dry * tau ** 1.5)
+            cov = (avail - drysens * (1.0 - tooth[y, x]) - 0.08) / 0.2
+            if cov &lt;= 0.0: continue
+            if cov &gt; 1.0: cov = 1.0
+            a = opac * e * cov * ce * cb
+            f = bc[k]
+            c_r = cs[bi, 0] + bt * (cs[bi + 1, 0] - cs[bi, 0]) + f * sv[0]
+            c_g = cs[bi, 1] + bt * (cs[bi + 1, 1] - cs[bi, 1]) + f * sv[1]
+            c_b = cs[bi, 2] + bt * (cs[bi + 1, 2] - cs[bi, 2]) + f * sv[2]
+            col[y, x, 0] += a * (c_r - col[y, x, 0])
+            col[y, x, 1] += a * (c_g - col[y, x, 1])
+            col[y, x, 2] += a * (c_b - col[y, x, 2])
+            bump = (q - 0.84) / 0.11
+            hd = thick * (0.4 + 0.6 * bl[k]) * (1.0 - 0.45 * tau) + ridge * thick * math.exp(-bump * bump)
+            hgt[y, x] = hgt[y, x] * (1.0 - 0.6 * a) + a * hd
+
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def _bristles(r, bl, bc, bend):
+    nb = int(2 * r / 1.7)
+    if nb &lt; 4: nb = 4
+    if nb &gt; bl.shape[0]: nb = bl.shape[0]
+    w = np.random.randn(); l = np.random.rand()
+    for k in range(nb):
+        w = 0.6 * w + 0.8 * np.random.randn()
+        l = 0.5 * l + 0.5 * np.random.rand()
+        bc[k] = max(-1.5, min(1.5, w))
+        bl[k] = 0.55 + 0.45 * l
+        bend[k] = 0.28 * np.random.rand() ** 2
+    return nb
+
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def _trace(src, ang, reg, x, y, dx, dy, step, nmax, c0, tol, rg, ox, oy, wander):
+    H = ang.shape[0]; W = ang.shape[1]
+    n = 0
+    for i in range(nmax):
+        x += dx * step; y += dy * step
+        xi = int(x); yi = int(y)
+        if xi &lt; 1 or xi &gt;= W - 1 or yi &lt; 1 or yi &gt;= H - 1: break
+        if reg[yi, xi] != rg: break
+        d = abs(src[yi, xi, 0] - c0[0]) + abs(src[yi, xi, 1] - c0[1]) + abs(src[yi, xi, 2] - c0[2])
+        if d &gt; tol: break
+        ox[n] = x; oy[n] = y; n += 1
+        a = ang[yi, xi] + wander * np.random.randn()
+        nx = math.cos(a); ny = math.sin(a)
+        if nx * dx + ny * dy &lt; 0: nx = -nx; ny = -ny
+        dx = 0.55 * dx + 0.45 * nx; dy = 0.55 * dy + 0.45 * ny
+        m = math.sqrt(dx * dx + dy * dy) + 1e-9
+        dx /= m; dy /= m
+    return n
+
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def _layer(col, hgt, tooth, src, ang, reg, lenf, px, py, pr, seed, maxlen, tol, cjit, streak,
+           opac, thick, thickv, dry, drysens, pickup, edge, ridge, wander):
+    np.random.seed(seed)
+    fx = np.empty(160); fy = np.empty(160); gx = np.empty(160); gy = np.empty(160)
+    sx = np.empty(330); sy = np.empty(330)
+    bl = np.empty(128); bc = np.empty(128); bend = np.empty(128)
+    c = np.empty(3); sv = np.empty(3); c0 = np.empty(3)
+    for j in range(px.shape[0]):
+        x = px[j]; y = py[j]; r = pr[j]
+        xi = int(x); yi = int(y)
+        c0[0] = src[yi, xi, 0]; c0[1] = src[yi, xi, 1]; c0[2] = src[yi, xi, 2]
+        rg = reg[yi, xi]
+        step = max(1.5, 0.6 * r)
+        nmax = int(maxlen * r * lenf[yi, xi] / step)
+        if nmax &lt; 1: nmax = 1
+        if nmax &gt; 150: nmax = 150
+        a0 = ang[yi, xi] + wander * np.random.randn()
+        dx = math.cos(a0); dy = math.sin(a0)
+        nfw = int(nmax * (0.3 + 0.4 * np.random.rand())) + 1
+        nf = _trace(src, ang, reg, x, y, dx, dy, step, nfw, c0, tol, rg, fx, fy, wander)
+        ng = _trace(src, ang, reg, x, y, -dx, -dy, step, nmax - nfw + 1, c0, tol, rg, gx, gy, wander)
+        n = 0
+        for i in range(ng - 1, -1, -1):
+            sx[n] = gx[i]; sy[n] = gy[i]; n += 1
+        sx[n] = x; sy[n] = y; n += 1
+        for i in range(nf):
+            sx[n] = fx[i]; sy[n] = fy[i]; n += 1
+        if n &lt; 2:
+            sx[1] = x + dx * step; sy[1] = y + dy * step; n = 2
+        if np.random.rand() &lt; 0.5:
+            for i in range(n // 2):
+                tx = sx[i]; sx[i] = sx[n - 1 - i]; sx[n - 1 - i] = tx
+                ty = sy[i]; sy[i] = sy[n - 1 - i]; sy[n - 1 - i] = ty
+        nb = _bristles(r, bl, bc, bend)
+        v = 1.0 + 0.3 * cjit * np.random.randn()
+        g = np.random.randn()
+        h0 = np.random.randn(); h1 = np.random.randn(); h2 = np.random.randn()
+        hm = 0.3 * h0 + 0.6 * h1 + 0.1 * h2
+        l0 = 0.3 * c0[0] + 0.6 * c0[1] + 0.1 * c0[2]
+        c[0] = c0[0] * v + cjit * (h0 - hm) * (0.06 + l0)
+        c[1] = c0[1] * v + cjit * (h1 - hm) * (0.06 + l0)
+        c[2] = c0[2] * v + cjit * (h2 - hm) * (0.06 + l0)
+        for k in range(3):
+            c[k] = min(1.0, max(0.0, c[k]))
+            sv[k] = streak * (0.5 * g * (0.25 + c[k]) + 0.4 * np.random.randn())
+        lum = 0.3 * c[0] + 0.6 * c[1] + 0.1 * c[2]
+        th = thick * (1.0 + thickv * (lum - 0.35) * 2.2)
+        if th &lt; 0.05 * thick: th = 0.05 * thick
+        _stroke(col, hgt, tooth, sx, sy, n, r, c, sv, bl[:nb], bc[:nb], bend[:nb],
+                opac, th, dry, drysens, pickup, edge, ridge)
+
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def _one(col, hgt, tooth, sx, sy, r, c, seed, streak, opac, thick, dry, drysens, pickup, edge, ridge):
+    np.random.seed(seed)
+    bl = np.empty(128); bc = np.empty(128); bend = np.empty(128); sv = np.empty(3)
+    nb = _bristles(r, bl, bc, bend)
+    g = np.random.randn()
+    for k in range(3):
+        sv[k] = streak * (0.6 * g * (0.25 + c[k]) + 0.35 * np.random.randn())
+    _stroke(col, hgt, tooth, sx, sy, sx.shape[0], r, c, sv, bl[:nb], bc[:nb], bend[:nb],
+            opac, thick, dry, drysens, pickup, edge, ridge)
+
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def _ribbon(px, py, pw, W, H):
+    &quot;&quot;&quot;distance field of a tapering polyline: returns crop of (q, t, angle).&quot;&quot;&quot;
+    n = px.shape[0]
+    wm = pw.max()
+    x0 = max(0, int(px.min() - wm - 2)); x1 = min(W, int(px.max() + wm + 3))
+    y0 = max(0, int(py.min() - wm - 2)); y1 = min(H, int(py.max() + wm + 3))
+    if x1 &lt;= x0 or y1 &lt;= y0:
+        return 0, 0, np.full((1, 1), 9.0, np.float32), np.zeros((1, 1), np.float32), np.zeros((1, 1), np.float32)
+    q = np.full((y1 - y0, x1 - x0), 9.0, np.float32)
+    tt = np.zeros((y1 - y0, x1 - x0), np.float32)
+    aa = np.zeros((y1 - y0, x1 - x0), np.float32)
+    for y in range(y0, y1):
+        for x in range(x0, x1):
+            best = 1e18; bi = 0; bt = 0.0; cr = 0.0
+            for i in range(n - 1):
+                ax = x - px[i]; ay = y - py[i]
+                bx = px[i + 1] - px[i]; by = py[i + 1] - py[i]
+                t = (ax * bx + ay * by) / (bx * bx + by * by + 1e-9)
+                if t &lt; 0.0: t = 0.0
+                elif t &gt; 1.0: t = 1.0
+                ex = ax - t * bx; ey = ay - t * by
+                d2 = ex * ex + ey * ey
+                if d2 &lt; best:
+                    best = d2; bi = i; bt = t; cr = bx * ay - by * ax
+            w = pw[bi] + bt * (pw[bi + 1] - pw[bi])
+            d = math.sqrt(best) / (w + 1e-6)
+            if d &lt; 3.0:
+                q[y - y0, x - x0] = d if cr &gt;= 0 else -d
+                tt[y - y0, x - x0] = (bi + bt) / (n - 1)
+                aa[y - y0, x - x0] = math.atan2(py[bi + 1] - py[bi], px[bi + 1] - px[bi])
+    return x0, y0, q, tt, aa
+
+
+@njit(cache=True, fastmath=True, parallel=True, error_model=&#x27;numpy&#x27;)
+def _lic(col, ang, mask, L):
+    &quot;&quot;&quot;drag the wet paint along the way the brush went.&quot;&quot;&quot;
+    H = col.shape[0]; W = col.shape[1]
+    out = col.copy()
+    for y in prange(H):
+        for x in range(W):
+            m = mask[y, x]
+            if m &lt; 0.03: continue
+            n = int(L * m) + 1
+            a0 = col[y, x, 0]; a1 = col[y, x, 1]; a2 = col[y, x, 2]; cnt = 1.0
+            for sg in range(2):
+                a = ang[y, x]
+                dx = math.cos(a); dy = math.sin(a)
+                if sg == 1: dx = -dx; dy = -dy
+                fx = x + 0.0; fy = y + 0.0
+                for k in range(n):
+                    fx += dx; fy += dy
+                    xi = int(fx + 0.5); yi = int(fy + 0.5)
+                    if xi &lt; 0 or xi &gt;= W or yi &lt; 0 or yi &gt;= H: break
+                    w = 1.0 - k / (n + 1.0)
+                    a0 += w * col[yi, xi, 0]; a1 += w * col[yi, xi, 1]; a2 += w * col[yi, xi, 2]; cnt += w
+                    b = ang[yi, xi]; nx = math.cos(b); ny = math.sin(b)
+                    if nx * dx + ny * dy &lt; 0: nx = -nx; ny = -ny
+                    dx = nx; dy = ny
+            out[y, x, 0] = a0 / cnt; out[y, x, 1] = a1 / cnt; out[y, x, 2] = a2 / cnt
+    return out
+
+
+# =====================================================================
+#  SMALL TOOLS
+# =====================================================================
+
+def smooth(a, b, x):
+    t = np.clip((x - a) / (b - a), 0.0, 1.0)
+    return t * t * (3 - 2 * t)
+
+def lerp(a, b, t):
+    a = np.asarray(a, np.float32); b = np.asarray(b, np.float32)
+    if np.ndim(t) == 2 and np.shape(t)[-1] != 1 and (a.ndim == 1 or b.ndim == 1 or a.ndim == 3):
+        t = t[..., None]
+    return a + (b - a) * t
+
+def vnoise(H, W, cell, rng, aspect=1.0):
+    &quot;&quot;&quot;smooth noise in 0..1; features `cell` px wide and cell*aspect px tall.&quot;&quot;&quot;
+    cx = max(1.0, cell); cy = max(1.0, cell * aspect)
+    gh = int(H / cy) + 4; gw = int(W / cx) + 4
+    g = rng.random((gh, gw)).astype(np.float32)
+    im = Image.fromarray(g).resize((int(gw * cx) + 1, int(gh * cy) + 1), Image.BICUBIC)
+    a = np.asarray(im)
+    oy = int(cy * (1 + rng.random())); ox = int(cx * (1 + rng.random()))
+    return np.clip(a[oy:oy + H, ox:ox + W], 0, 1)
+
+def fbm(H, W, cell, rng, octaves=4, aspect=1.0, gain=0.5):
+    out = np.zeros((H, W), np.float32); amp = 1.0; tot = 0.0
+    for o in range(octaves):
+        out += amp * vnoise(H, W, cell / 2 ** o, rng, aspect); tot += amp; amp *= gain
+    out /= tot
+    return np.clip((out - 0.5) * 1.9 + 0.5, 0, 1)
+
+def blur(a, s):
+    if a.ndim == 3:
+        return np.stack([gaussian_filter(a[..., k], s) for k in range(3)], -1)
+    return gaussian_filter(a, s)
+
+def lum(c):
+    return 0.3 * c[..., 0] + 0.6 * c[..., 1] + 0.1 * c[..., 2]
+
+def spline(pts, n=40):
+    pts = np.asarray(pts, float)
+    d = np.r_[0, np.cumsum(np.hypot(*np.diff(pts, axis=0).T))]
+    cs = CubicSpline(d, pts, bc_type=&#x27;natural&#x27;) if len(pts) &gt; 2 else None
+    t = np.linspace(0, d[-1], n)
+    return cs(t) if cs is not None else np.stack([np.interp(t, d, pts[:, 0]), np.interp(t, d, pts[:, 1])], 1)
+
+
+SIGNATURE = [
+    [(0.43, 0.47), (0.40, 0.45), (0.35, 0.35), (0.29, 0.30), (0.21, 0.26), (0.15, 0.25), (0.08, 0.27), (0.03, 0.34), (0.00, 0.40), (0.00, 0.50)],
+    [(0.00, 0.50), (0.02, 0.62), (0.05, 0.70), (0.10, 0.74), (0.17, 0.73), (0.20, 0.70), (0.23, 0.65), (0.23, 0.58), (0.22, 0.54), (0.15, 0.49), (0.01, 0.50)],
+    [(0.43, 0.47), (0.46, 0.45), (0.51, 0.36), (0.55, 0.32), (0.66, 0.26), (0.72, 0.25), (0.78, 0.27), (0.83, 0.30), (0.86, 0.37), (0.86, 0.49), (0.78, 0.63), (0.71, 0.70), (0.62, 0.76), (0.31, 0.90), (0.29, 0.92), (0.29, 0.97), (0.33, 0.99), (0.42, 1.00), (0.86, 0.98)],
+    [(0.43, 0.47), (0.42, 0.71)],
+    [(1.13, 0.52), (1.36, 0.49), (1.46, 0.43), (1.48, 0.40), (1.47, 0.35), (1.42, 0.29), (1.36, 0.26), (1.28, 0.24), (1.20, 0.23), (1.12, 0.25), (1.08, 0.30), (1.05, 0.39), (1.05, 0.54), (1.08, 0.67), (1.14, 0.71), (1.22, 0.73), (1.50, 0.74), (1.66, 0.72), (1.74, 0.66), (1.76, 0.62), (1.78, 0.55), (1.78, 0.40), (1.75, 0.24)],
+    [(2.39, 0.44), (2.35, 0.42), (2.30, 0.32), (2.22, 0.26), (2.14, 0.24), (2.07, 0.26), (2.02, 0.33), (1.97, 0.53), (1.97, 0.62), (1.99, 0.67), (2.02, 0.71), (2.07, 0.73), (2.13, 0.73), (2.17, 0.71), (2.21, 0.67), (2.23, 0.60), (2.23, 0.54), (2.19, 0.48), (2.14, 0.47), (2.10, 0.49)],
+    [(2.39, 0.44), (2.40, 0.72)],
+    [(2.39, 0.44), (2.41, 0.42), (2.47, 0.30), (2.52, 0.25), (2.61, 0.25), (2.65, 0.26), (2.69, 0.30)],
+    [(2.69, 0.30), (2.61, 0.42), (2.56, 0.60), (2.57, 0.68), (2.60, 0.73), (2.64, 0.74), (2.71, 0.73), (2.75, 0.71), (2.79, 0.68), (2.83, 0.61), (2.83, 0.55), (2.79, 0.45), (2.76, 0.38), (2.70, 0.30)],
+    [(2.97, 0.38), (2.94, 0.36), (2.91, 0.29), (2.84, 0.24), (2.76, 0.25), (2.70, 0.30)],
+    [(2.97, 0.39), (2.97, 0.74)],
+    [(2.98, 0.38), (3.01, 0.36), (3.07, 0.28), (3.13, 0.25), (3.20, 0.25), (3.26, 0.31)],
+    [(3.26, 0.32), (3.16, 0.44), (3.13, 0.53), (3.12, 0.59), (3.14, 0.66), (3.17, 0.70), (3.23, 0.73), (3.31, 0.73), (3.36, 0.71), (3.39, 0.67), (3.40, 0.57), (3.36, 0.45), (3.27, 0.32)],
+    [(3.27, 0.32), (3.36, 0.25), (3.46, 0.24), (3.57, 0.27), (3.63, 0.34), (3.65, 0.41), (3.65, 0.50), (3.62, 0.60), (3.54, 0.73)],
+    [(3.88, 0.94), (3.89, 0.71), (3.94, 0.30), (3.94, 0.22), (3.90, 0.10), (3.82, 0.02), (3.71, 0.00), (3.59, 0.03), (3.44, 0.12)],
+]
+
+
+# =====================================================================
+#  THE CANVAS
+# =====================================================================
+
+class Painting:
+    def __init__(self, W, H, seed, ground=(0.60, 0.33, 0.20)):
+        self.W, self.H = W, H
+        self.S = W / 2400.0
+        self.rng = np.random.default_rng(seed)
+        self.seed = seed
+        S, rng = self.S, self.rng
+        Y, X = np.mgrid[0:H, 0:W].astype(np.float32)
+        self.X, self.Y = X, Y
+        # coarse canvas: plain weave, uneven threads
+        p = 7.0 * S if S &gt;= 0.6 else 5.0
+        wx = (vnoise(H, W, 90 * S, rng) - 0.5) * 5 * S
+        wy = (vnoise(H, W, 90 * S, rng) - 0.5) * 5 * S
+        wv = 0.5 + 0.5 * np.cos(2 * np.pi * (X + wx) / p) * np.cos(2 * np.pi * (Y + wy) / p)
+        slub = vnoise(H, W, 5 * S, rng, aspect=30) * 0.5 + vnoise(H, W, 150 * S, rng, aspect=0.03) * 0.5
+        self.tooth = np.clip(wv * (0.75 + 0.5 * slub), 0, 1).astype(np.float32)
+        # toned ground, scrubbed on with a wide brush
+        g = np.asarray(ground, np.float32)
+        scr = fbm(H, W, 260 * S, rng, 3, aspect=0.25)
+        self.col = (g[None, None, :] * (0.86 + 0.24 * scr[..., None]) * (0.93 + 0.07 * self.tooth[..., None])).astype(np.float32)
+        self.ground = self.col.copy()
+        self.hgt = np.zeros((H, W), np.float32)
+        self.ref = np.zeros((H, W, 3), np.float32)
+        self.ang = np.zeros((H, W), np.float32)
+        self.lenf = np.ones((H, W), np.float32)
+        self.reg = np.zeros((H, W), np.int32)
+        self.detail = np.zeros((H, W), np.float32)
+        # the painted field stops short of the edge, unevenly
+        d = np.minimum(np.minimum(X, W - 1 - X), np.minimum(Y, H - 1 - Y))
+        self.edge = d + (fbm(H, W, 120 * S, rng, 3) - 0.5) * 60 * S
+        self._k = 0
+
+    # ---- building the drawing ------------------------------------------------
+    def put(self, mask, colour, ang=None, reg=None, lenf=None, detail=None, at=None):
+        &quot;&quot;&quot;lay a shape into the drawing.  at=(x0,y0) for a cropped mask.&quot;&quot;&quot;
+        if at is None:
+            sl = (slice(None), slice(None))
+        else:
+            sl = (slice(at[1], at[1] + mask.shape[0]), slice(at[0], at[0] + mask.shape[1]))
+        m = np.clip(mask, 0, 1).astype(np.float32)
+        c = np.asarray(colour, np.float32)
+        self.ref[sl] += m[..., None] * (c - self.ref[sl])
+        hard = m &gt; 0.5
+        if ang is not None:
+            self.ang[sl] = np.where(hard, ang, self.ang[sl])
+        if reg is not None:
+            self.reg[sl] = np.where(hard, reg, self.reg[sl])
+        if lenf is not None:
+            self.lenf[sl] = np.where(hard, lenf, self.lenf[sl])
+        if detail is not None:
+            self.detail[sl] = np.maximum(self.detail[sl], m * detail)
+
+    def ribbon(self, pts, widths):
+        pts = np.asarray(pts, np.float64); w = np.asarray(widths, np.float64)
+        if w.ndim == 0: w = np.full(len(pts), float(w))
+        if len(w) != len(pts): w = np.interp(np.linspace(0, 1, len(pts)), np.linspace(0, 1, len(w)), w)
+        return _ribbon(np.ascontiguousarray(pts[:, 0]), np.ascontiguousarray(pts[:, 1]), w, self.W, self.H)
+
+    # ---- painting ------------------------------------------------------------
+    def layer(self, src, r, spacing=0.9, mask=None, err=None, order=&#x27;value&#x27;, maxlen=6.0, tol=0.22,
+              cjit=0.05, streak=0.05, opac=0.95, thick=1.0, thickv=0.6, dry=0.6, drysens=0.5,
+              pickup=0.06, edge=0.35, ridge=0.4, wander=0.12, sizev=0.3, margin=26):
+        W, H, S, rng = self.W, self.H, self.S, self.rng
+        r = r * S
+        g = max(1.5, r * spacing)
+        xs = np.arange(g / 2, W, g); ys = np.arange(g / 2, H, g)
+        gx, gy = np.meshgrid(xs, ys)
+        px = (gx + rng.uniform(-g / 2, g / 2, gx.shape)).ravel().clip(1, W - 2)
+        py = (gy + rng.uniform(-g / 2, g / 2, gy.shape)).ravel().clip(1, H - 2)
+        ix = px.astype(int); iy = py.astype(int)
+        keep = self.edge[iy, ix] &gt; margin * S
+        if mask is not None:
+            keep &amp;= rng.random(len(px)) &lt; mask[iy, ix]
+        if err is not None:
+            e = np.abs(blur(self.col, max(1.0, r * 0.5)) - src).sum(-1)
+            keep &amp;= e[iy, ix] &gt; err / (0.35 + 1.5 * self.detail[iy, ix])
+        px, py, ix, iy = px[keep], py[keep], ix[keep], iy[keep]
+        if len(px) == 0: return 0
+        if order == &#x27;value&#x27;:      # darks first and thin, lights last and thick
+            o = np.argsort(lum(src[iy, ix]) + rng.normal(0, 0.10, len(px)))
+        else:
+            o = rng.permutation(len(px))
+        px, py = px[o], py[o]
+        pr = r * (1.0 + sizev * rng.uniform(-1, 1, len(px)))
+        self._k += 1
+        _layer(self.col, self.hgt, self.tooth, np.ascontiguousarray(src, np.float32), self.ang, self.reg, self.lenf,
+               px, py, pr, self.seed % 100000 + 17 * self._k, maxlen, tol, cjit, streak,
+               opac, thick, thickv, dry, drysens, pickup, edge, ridge, wander)
+        return len(px)
+
+    def stroke(self, pts, r, colour, streak=0.04, opac=1.0, thick=1.0, dry=0.5, drysens=0.4,
+               pickup=0.0, edge=0.3, ridge=0.4, smooth_pts=True):
+        &quot;&quot;&quot;one deliberate stroke along a path (canvas pixels).&quot;&quot;&quot;
+        pts = np.asarray(pts, float)
+        r = max(0.7, r)
+        ln = np.hypot(*np.diff(pts, axis=0).T).sum()
+        n = int(max(2, min(300, ln / max(1.2, 0.6 * r) + 1)))
+        p = spline(pts, n) if smooth_pts and len(pts) &gt; 2 else np.stack(
+            [np.interp(np.linspace(0, 1, n), np.linspace(0, 1, len(pts)), pts[:, k]) for k in (0, 1)], 1)
+        self._k += 1
+        _one(self.col, self.hgt, self.tooth, np.ascontiguousarray(p[:, 0]), np.ascontiguousarray(p[:, 1]), float(r),
+             np.asarray(colour, np.float64), self.seed % 100000 + 31 * self._k, streak, opac, thick, dry, drysens,
+             pickup, edge, ridge)
+
+    def dab(self, x, y, a, length, r, colour, **kw):
+        dx, dy = math.cos(a) * length / 2, math.sin(a) * length / 2
+        self.stroke([(x - dx, y - dy), (x + dx, y + dy)], r, colour, smooth_pts=False, **kw)
+
+    def glaze(self, mask, colour, strength=0.5, cell=40):
+        &quot;&quot;&quot;a transparent film: darkens and tints, never covers.&quot;&quot;&quot;
+        S, rng = self.S, self.rng
+        st = 0.7 + 0.3 * fbm(self.H, self.W, cell * S, rng, 2, aspect=4)
+        m = (np.clip(mask, 0, 1) * strength * st)[..., None]
+        c = np.asarray(colour, np.float32)
+        self.col *= (1 - m) + m * c
+
+    def blend(self, mask, length=14, soften=0.0):
+        &quot;&quot;&quot;work wet into wet where the edges should be lost.&quot;&quot;&quot;
+        m = np.clip(mask, 0, 1).astype(np.float32)
+        self.col = _lic(self.col, self.ang, m, float(length * self.S))
+        if soften &gt; 0:
+            b = blur(self.col, soften * self.S)
+            self.col += (m * 0.6)[..., None] * (b - self.col)
+        self.hgt *= (1 - 0.5 * m)
+
+    def sign(self, x, y, h, colour=(0.62, 0.20, 0.10)):
+        &quot;&quot;&quot;lamp mark, then the name.  x,y = lower-right corner of the signature, canvas px.&quot;&quot;&quot;
+        S = self.S
+        w = 3.94 * h
+        x0 = x - w; y0 = y - h
+        r = max(1.0, 0.045 * h)
+        for path in SIGNATURE:
+            p = [(x0 + a * h, y0 + b * h) for a, b in path]
+            self.stroke(p, r, colour, streak=0.02, thick=0.5, dry=0.25, drysens=0.25, edge=0.5, smooth_pts=len(p) &gt; 3)
+        lx = x0 - 0.75 * h; ly = y0 + 0.70 * h          # the lamp: a bowl, a wick, a flame
+        self.stroke([(lx - 0.30 * h, ly - 0.10 * h), (lx - 0.16 * h, ly + 0.08 * h), (lx + 0.16 * h, ly + 0.08 * h),
+                     (lx + 0.30 * h, ly - 0.10 * h)], r, colour, streak=0.02, thick=0.5, dry=0.2, drysens=0.25)
+        self.stroke([(lx - 0.12 * h, ly + 0.14 * h), (lx + 0.12 * h, ly + 0.14 * h)], r, colour, thick=0.5, dry=0.2, drysens=0.25)
+        self.stroke([(lx, ly - 0.16 * h), (lx - 0.07 * h, ly - 0.32 * h), (lx, ly - 0.56 * h), (lx + 0.07 * h, ly - 0.32 * h),
+                     (lx, ly - 0.16 * h)], r * 0.9, colour, thick=0.5, dry=0.2, drysens=0.25)
+
+    # ---- the finished surface under a raking light ---------------------------
+    def finish(self, relief=1.0, sat=1.03, weave=0.22):
+        S = self.S
+        h = gaussian_filter(self.hgt, 1.0 * S)
+        wv = self.tooth * np.exp(-2.2 * np.clip(h, 0, 3))             # thin paint lets the canvas show
+        surf = (1.5 * h + weave * wv) * S * relief
+        gy, gx = np.gradient(surf)
+        l = np.array([-0.55, -0.62, 0.56]); l /= np.linalg.norm(l)    # window high on the left
+        nz = 1.0 / np.sqrt(gx * gx + gy * gy + 1.0)
+        shade = (-gx * l[0] - gy * l[1] + l[2]) * nz / l[2]
+        hv = np.array([l[0], l[1], l[2] + 1.0]); hv /= np.linalg.norm(hv)
+        spec = np.clip((-gx * hv[0] - gy * hv[1] + hv[2]) * nz, 0, 1) ** 60
+        spec = (spec - spec.mean()) * np.clip(h, 0, 1.2) * 0.07
+        out = self.col * (0.70 + 0.30 * shade[..., None]) + spec[..., None] * np.array([1.0, 0.97, 0.9])
+        m = out.mean(-1, keepdims=True)
+        out = m + (out - m) * sat
+        out += (self.rng.random(out.shape[:2])[..., None] - 0.5) / 255.0
+        return np.clip(out, 0, 1)
+
+
+def save(img, path):
+    Image.fromarray((np.clip(img, 0, 1) * 255 + 0.5).astype(np.uint8)).save(path)
+
+
+
+
+# =====================================================================
+#  GEOMETRY AND LIGHT
+#  The place is built as solid form and lit by its own lamp and its own
+#  sky.  Each picture supplies scene(x, y, z) -&gt; (distance, material).
+# =====================================================================
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def hash3(i, j, k):
+    n = (i * 374761393 + j * 668265263 + k * 1274126177) &amp; 0x7fffffff
+    n = ((n ^ (n &gt;&gt; 13)) * 1274126177) &amp; 0x7fffffff
+    return ((n ^ (n &gt;&gt; 16)) &amp; 0xffffff) / 16777216.0
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def noise3(x, y, z):
+    i = math.floor(x); j = math.floor(y); k = math.floor(z)
+    u = x - i; v = y - j; w = z - k
+    u = u * u * (3 - 2 * u); v = v * v * (3 - 2 * v); w = w * w * (3 - 2 * w)
+    i = int(i); j = int(j); k = int(k)
+    a = hash3(i, j, k) + u * (hash3(i + 1, j, k) - hash3(i, j, k))
+    b = hash3(i, j + 1, k) + u * (hash3(i + 1, j + 1, k) - hash3(i, j + 1, k))
+    c = hash3(i, j, k + 1) + u * (hash3(i + 1, j, k + 1) - hash3(i, j, k + 1))
+    d = hash3(i, j + 1, k + 1) + u * (hash3(i + 1, j + 1, k + 1) - hash3(i, j + 1, k + 1))
+    e = a + v * (b - a); f = c + v * (d - c)
+    return e + w * (f - e)
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def fbm3(x, y, z, o):
+    s = 0.0; a = 0.5; t = 0.0
+    for i in range(o):
+        s += a * noise3(x, y, z); t += a; a *= 0.5
+        x = x * 2.03 + 11.3; y = y * 2.03 + 5.7; z = z * 2.03 + 3.1
+    return s / t
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def fbm2(x, z, o):
+    return fbm3(x, 0.37, z, o)
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def sstep(a, b, x):
+    t = (x - a) / (b - a)
+    if t &lt; 0: t = 0.0
+    if t &gt; 1: t = 1.0
+    return t * t * (3 - 2 * t)
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def sd_box(x, y, z, bx, by, bz):
+    qx = abs(x) - bx; qy = abs(y) - by; qz = abs(z) - bz
+    ox = max(qx, 0.0); oy = max(qy, 0.0); oz = max(qz, 0.0)
+    return math.sqrt(ox * ox + oy * oy + oz * oz) + min(max(qx, max(qy, qz)), 0.0)
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def sd_capsule(x, y, z, ax, ay, az, bx, by, bz, r):
+    px = x - ax; py = y - ay; pz = z - az
+    ex = bx - ax; ey = by - ay; ez = bz - az
+    h = (px * ex + py * ey + pz * ez) / (ex * ex + ey * ey + ez * ez + 1e-12)
+    if h &lt; 0: h = 0.0
+    if h &gt; 1: h = 1.0
+    px -= ex * h; py -= ey * h; pz -= ez * h
+    return math.sqrt(px * px + py * py + pz * pz) - r
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def smin(a, b, k):
+    h = max(k - abs(a - b), 0.0) / k
+    return min(a, b) - h * h * k * 0.25
+
+
+# =====================================================================
+#  THE PICTURE
+#  A kavu on a laterite brow above what was Kochi.  Late afternoon in
+#  Karkidakam; the cloud has torn once, behind the left shoulder, and
+#  the sun comes through it low, across the plinth and out over the
+#  valley.  Everything else is under the cloud.  Someone has lit the lamp.
+# =====================================================================
+from scipy.ndimage import map_coordinates
+
+LAT, LON, MINUTE = 9.9658, 76.2421, 16 * 60 + 50
+SEED = int(LAT * 1e4) * 7919 + int(LON * 1e4) * 104729 + MINUTE
+
+CAMX, CAMY, CAMZ = -0.7, 1.25, 1.0
+PITCH = 0.04
+TX, TY = 0.50, 0.375
+TMAX = 4700.0
+
+PCX, PCZ = -2.3, 10.6                        # the plinth, and the way it is turned
+PC1, PS1 = 0.906, -0.423
+PLAT = 0.66
+LLX, LLZ = -1.25, -0.20                      # the lamp, in the plinth&#x27;s own measure
+TRX, TRZ = -5.3, 9.2                        # the fig that has taken the corner
+WATER = -0.05
+
+_s = np.array([-0.60, 0.46, -0.65]); _s /= np.linalg.norm(_s)
+SUNX, SUNY, SUNZ = float(_s[0]), float(_s[1]), float(_s[2])
+
+# serpent stones: along the plinth, back from its edge.  lx, lz, height, width, lean
+STONES = np.array([(-1.74, 0.64, 0.60, 0.36, 0.05), (-0.94, 0.50, 0.96, 0.47, -0.03),
+                   (-0.08, 0.62, 0.74, 0.40, 0.09), (0.80, 0.44, 0.50, 0.33, -0.24)])
+
+# wood: ax ay az  bx by bz  r
+SEGS = np.array([
+    (-5.0, 0.55, 9.75, -4.85, 0.84, 10.6, 0.15), (-4.85, 0.84, 10.6, -4.3, 0.82, 11.25, 0.11),      # a root over the plinth
+    (-4.3, 0.82, 11.25, -3.9, 0.72, 12.2, 0.08),
+    (-4.9, 0.16, 8.75, -4.0, 0.02, 8.35, 0.13), (-4.0, 0.02, 8.35, -2.9, -0.08, 8.15, 0.08),            # one along the ground
+    (-4.7, 0.3, 9.1, -4.25, 0.25, 8.95, 0.16),
+    (-5.15, 4.9, 9.3, -3.6, 6.2, 10.5, 0.27), (-3.6, 6.2, 10.5, -1.7, 6.9, 11.6, 0.19),               # the limb
+    (-4.2, 5.7, 10.05, -4.15, 0.7, 10.2, 0.034),                                                      # aerial roots
+    (-4.75, 5.4, 9.75, -4.72, 2.9, 9.8, 0.02),
+])
+
+# brow trees: x z crown_y radius trunk_r
+TREES = np.array([(-9.8, 22.0, 3.6, 3.4, 0.34), (-2.6, 31.0, 0.6, 3.0, 0.28), (5.8, 35.0, -2.8, 3.3, 0.26),
+                  (10.0, 41.0, -5.0, 4.2, 0.30)])
+_rg = np.random.default_rng(SEED + 5)
+_cr = [(-6.0, 6.2, 10.6, 2.2), (-4.1, 7.0, 11.3, 1.9), (-5.6, 5.3, 11.6, 1.7), (-7.6, 7.6, 10.2, 2.4), (-2.6, 7.6, 12.0, 1.5),
+       (14.0, -2.5, 66.0, 5.0), (-12.0, -3.0, 74.0, 5.5), (30.0, -2.0, 86.0, 5.5)]
+for _t in TREES:
+    _cr.append((_t[0], _t[2], _t[1], _t[3]))
+    for _k in range(2):
+        _a = _rg.uniform(0, 6.28); _r = _t[3] * _rg.uniform(0.55, 0.75)
+        _cr.append((_t[0] + math.cos(_a) * _t[3] * 0.7, _t[2] + _rg.uniform(-0.25, 0.3) * _t[3], _t[1] + math.sin(_a) * _t[3] * 0.7, _r))
+CROWNS = np.array(_cr)
+
+# towers: x z half_a half_b base top cos sin break seed bound canopy_level
+_tw = [(60.0, 330.0, 7.8, 5.2, -40.0, 40.0, 0.25, 16.0, 1.0),
+       (130.0, 480.0, 10.4, 7.8, -40.0, 85.0, -0.35, 5.0, 2.0),
+       (215.0, 610.0, 7.8, 7.8, -40.0, 78.0, 0.5, 26.0, 3.0),
+       (95.0, 700.0, 13.0, 7.8, -40.0, 150.0, 0.1, 9.0, 4.0),
+       (-150.0, 900.0, 10.4, 10.4, -40.0, 110.0, 0.7, 30.0, 5.0),
+       (330.0, 950.0, 13.0, 10.4, -40.0, 120.0, -0.2, 12.0, 6.0)]
+TOW = np.array([(t[0], t[1], t[2], t[3], t[4], t[5], math.cos(t[6]), math.sin(t[6]), t[7], t[8],
+                 math.hypot(t[2], t[3]) + 24.0, -13.0 + 0.085 * max(t[1] - 330.0, 0.0)) for t in _tw])
+FH, BW = 3.9, 5.2
+
+# the limb: from over the right shoulder of the picture down to somewhere past the hills
+LAX, LAY, LAZ = 1346.0, 660.0, 500.0
+LBX, LBY, LBZ = -878.0, 92.0, 4500.0
+VEIL_U = 0.44
+
+# palms that stand above the rest: x, crown_y, z, lean
+PALMS = np.array([(3.5, 7.0, 46.0, 0.9), (-7.0, 5.5, 52.0, -0.8), (1.5, 8.5, 72.0, 0.5), (19.0, 4.5, 62.0, -0.8)])
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def ground_h(x, z):
+    h = 0.14 * (fbm2(x * 0.45, z * 0.45, 3) - 0.5) + 0.035 * (fbm2(x * 2.6 + 9.0, z * 2.6, 2) - 0.5)
+    h -= 0.19 * math.exp(-((x + 0.3) / 3.6) ** 2 - ((z - 6.0) / 1.6) ** 2) * (0.7 + 0.6 * noise3(x * 0.55, 1.3, z * 0.55))
+    h += 0.20 * math.exp(-((x - 0.9) / 1.5) ** 2 - ((z - 9.9) / 1.5) ** 2)
+    h += 0.55 * sstep(4.3, 2.4, z)
+    h -= 30.0 * sstep(16.0, 70.0, z + 4.0 * (noise3(x * 0.11, 2.2, 0.5) - 0.5))
+    return h
+
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def heave(lx, lz):
+    return (0.20 * math.exp(-((lx + 2.7) / 1.2) ** 2 - ((lz - 0.2) / 1.7) ** 2) + 0.10 * (fbm2(lx * 0.7 + 3.0, lz * 0.7, 2) - 0.5)
+            - 0.15 * sstep(1.3, 2.7, lx) * sstep(0.3, -1.4, lz) + 0.035 * lx * 0.3)
+
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def canopy_y(x, z):
+    f = sstep(30.0, 62.0, z)
+    base = -30.0 * sstep(16.0, 70.0, z) - 3.0
+    roll = 13.0 * (fbm2(x * 0.008 + 5.0, z * 0.008, 2) - 0.5)
+    rise = 0.085 * min(max(z - 330.0, 0.0), 1500.0) * (0.45 + 1.1 * noise3(x * 0.0016 + 1.7, 0.3, z * 0.0016))
+    ys = base + (19.0 + roll) * f + rise
+    # crowns
+    cs = 13.0
+    ci = math.floor(x / cs); ck = math.floor(z / cs)
+    best = 0.0
+    for a in range(-1, 2):
+        for b in range(-1, 2):
+            i = int(ci) + a; k = int(ck) + b
+            px = (i + 0.15 + 0.7 * hash3(i, 3, k)) * cs; pz = (k + 0.15 + 0.7 * hash3(i, 5, k)) * cs
+            rr = cs * (0.55 + 0.40 * hash3(i, 9, k))
+            v = rr * (0.42 + 0.3 * hash3(i, 7, k)) * (1.0 - ((x - px) ** 2 + (z - pz) ** 2) / (rr * rr))
+            if v &gt; best: best = v
+    return ys + best * f
+
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def clump(x, y, z, cs):
+    &quot;&quot;&quot;leaves hang in clumps with air between them.&quot;&quot;&quot;
+    ci = math.floor(x / cs); cj = math.floor(y / cs); ck = math.floor(z / cs)
+    best = 1e9
+    for a in range(-1, 2):
+        for b in range(-1, 2):
+            for c in range(-1, 2):
+                i = int(ci) + a; j = int(cj) + b; k = int(ck) + c
+                h = hash3(i, j, k)
+                if h &gt; 0.58: continue
+                px = (i + 0.2 + 0.6 * hash3(i + 17, j, k)) * cs; py = (j + 0.2 + 0.6 * hash3(i, j + 31, k)) * cs; pz = (k + 0.2 + 0.6 * hash3(i, j, k + 47)) * cs
+                r = cs * (0.40 + 0.40 * h)
+                ex = x - px; ey = (y - py) * 1.15; ez = z - pz
+                dd = (math.sqrt(ex * ex + ey * ey + ez * ez) - r) * 0.74
+                if dd &lt; best: best = dd
+    return best
+
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def palm(x, y, z, px, py, pz, sd):
+    dx = x - px; dy = y - py; dz = z - pz
+    rho = math.sqrt(dx * dx + dz * dz)
+    if rho &gt; 5.6 or abs(dy) &gt; 4.6:
+        return max(rho - 5.0, abs(dy) - 4.0)
+    seg = 6.2832 / 9.0
+    phi = math.atan2(dz, dx) + sd
+    kf = math.floor(phi / seg + 0.5)
+    pr = phi - seg * kf
+    lat = rho * math.sin(pr); al = rho * math.cos(pr)
+    hk = hash3(int(kf) + 20, 3, int(sd * 10.0))
+    ln = 3.4 + 1.3 * hk
+    yf = (0.95 - 0.5 * hk) * al - (0.14 + 0.10 * hk) * al * al
+    w = 0.40 * (1.0 - al / (ln + 0.3)) + 0.04
+    dl = max(abs(lat) - w, 0.0); dv = dy - yf
+    d = math.sqrt(dl * dl + dv * dv + max(al - ln, 0.0) ** 2) - 0.07
+    return d * 0.5
+
+
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def scene(x, y, z):
+    d = 1e9; m = 0
+    # ================= the brow: earth, water, the plinth, the fig =================
+    if z &lt; 100.0:
+        g0 = ground_h(x, z)
+        d = (y - g0) * 0.7; m = 1
+        if z &lt; 9.5:
+            dw = y - WATER
+            if dw &lt; d: d = dw; m = 10
+        dx = x - PCX; dz = z - PCZ
+        lx = dx * PC1 + dz * PS1; lz = -dx * PS1 + dz * PC1
+        if abs(lx) &lt; 4.4 and abs(lz) &lt; 3.6 and y &lt; 2.6:
+            yy = y - heave(lx, lz)
+            b1 = sd_box(lx, yy + 0.39, lz, 3.05, 0.61, 1.85) - 0.02
+            qx = abs(lx) - 2.7; qy = yy - PLAT; qz = abs(lz) - 1.5
+            b2 = sd_box(lx, yy - (PLAT - 1.0) * 0.5, lz, 2.7, (PLAT + 1.0) * 0.5, 1.5) - 0.02
+            ds = min(b1, b2)
+            cut = sd_box(lx - 2.6, yy - 0.62, lz + 1.5, 0.48, 0.19, 0.42)        # where the corner has gone
+            ds = max(ds, -cut)
+            c7 = 0.819; s7 = 0.574
+            fx = lx - 3.45; fz = lz + 1.55
+            fb = sd_box(fx * c7 + fz * s7, yy - 0.02 + 0.2 * fx, -fx * s7 + fz * c7, 0.23, 0.14, 0.16) - 0.02   # ...and where it lies
+            if fb &lt; ds: ds = fb
+            if ds &lt; 0.2:
+                row = math.floor(yy / 0.22)
+                gy = abs(yy / 0.22 - math.floor(yy / 0.22 + 0.5)) * 0.22
+                u = lx / 0.46 + 0.5 * (row - 2.0 * math.floor(row * 0.5)) + 0.13 * hash3(int(row), 3, 1)
+                gx = abs(u - math.floor(u + 0.5)) * 0.46
+                w = lz / 0.31 + 0.37 * math.floor(lx / 0.46 + 0.5)
+                gz = abs(w - math.floor(w + 0.5)) * 0.31
+                if qy &gt;= qx and qy &gt;= qz: g = min(gx, abs(lz / 0.31 - math.floor(lz / 0.31 + 0.5)) * 0.31)
+                elif qz &gt;= qx: g = min(gx, gy)
+                else: g = min(gy, gz)
+                ds += 0.013 * sstep(0.022, 0.0, g) * (0.25 + 0.75 * noise3(x * 1.9, y * 1.9 + 5.0, z * 1.9))
+                ds -= 0.03 * (noise3(x * 8.0, y * 8.0, z * 8.0) - 0.5) + 0.10 * (noise3(x * 1.6, y * 1.6, z * 1.6) - 0.5)
+            ds *= 0.8
+            if ds &lt; d: d = ds; m = 2
+            # serpent stones
+            if yy &lt; PLAT + 1.6:
+                for k in range(4):
+                    hh = STONES[k, 2]; hw = STONES[k, 3] * 0.5
+                    py = yy - PLAT
+                    px = abs(lx - STONES[k, 0] - STONES[k, 4] * py)
+                    if py &lt; hh - hw:
+                        d2 = px - hw
+                    else:
+                        d2 = math.sqrt(px * px + (py - (hh - hw)) ** 2) - hw
+                    d3 = abs(lz - STONES[k, 1] - 0.10 * py + 0.05 * (k - 1.5)) - 0.07
+                    dd = max(d2, d3)
+                    if d2 &gt; 0 and d3 &gt; 0: dd = math.sqrt(d2 * d2 + d3 * d3)
+                    dd = max(dd, -py - 0.1) - 0.022
+                    dd -= 0.012 * (noise3(x * 11.0, y * 11.0, z * 11.0) - 0.5)
+                    dd *= 0.85
+                    if dd &lt; d: d = dd; m = 4
+            # the lamp
+            ex = lx - LLX; ez = lz - LLZ
+            if abs(ex) &lt; 0.4 and abs(ez) &lt; 0.4:
+                rr = math.sqrt(ex * ex + ez * ez)
+                py = yy - PLAT
+                dd = max(rr - (0.036 + 0.035 * math.exp(-py / 0.05) + 0.012 * math.exp(-((py - 0.21) / 0.02) ** 2)), py - 0.40)
+                cup = max(rr - (0.04 + 0.55 * max(py - 0.38, 0.0)), max(0.38 - py, py - 0.455))
+                if cup &lt; dd: dd = cup
+                dd = max(dd, -py - 0.1) * 0.8
+                if dd &lt; d: d = dd; m = 5
+            else:
+                bd = max(abs(ex), abs(ez)) - 0.12
+                if bd &lt; d: d = max(bd, 0.03)
+        else:
+            bd = sd_box(lx, y - 0.8, lz, 3.9, 1.3, 2.45)                           # never step past the plinth unseen
+            if bd &lt; d: d = max(bd, 0.03)
+        # the fig: trunk, roots, limb
+        if x &lt; 0.5 and z &lt; 16.0:
+            ex = x - TRX - 0.05 * y; ez = z - TRZ
+            rr = math.sqrt(ex * ex + ez * ez)
+            r0 = 0.62
+            if rr &lt; r0 * 3.4:
+                th = math.atan2(ez, ex)
+                yv = max(y, 0.0)
+                r = r0 * (1.0 + 0.95 * math.exp(-yv / 0.7)) * (1.0 + 0.20 * math.exp(-yv / 1.6) * math.cos(5.0 * th + 0.6))
+                r += 0.06 * (fbm3(th * 4.0, y * 0.8, 3.0, 3) - 0.5) + 0.02 * math.sin(th * 23.0 + 3.0 * noise3(th * 3.0, y * 0.5, 1.0))
+                dt = (rr - r) * 0.5
+            else:
+                dt = rr - r0 * 2.6
+            for k in range(SEGS.shape[0]):
+                dc = sd_capsule(x, y, z, SEGS[k, 0], SEGS[k, 1], SEGS[k, 2], SEGS[k, 3], SEGS[k, 4], SEGS[k, 5], SEGS[k, 6])
+                if k &lt; 8 and dc &lt; 0.5: dc -= 0.05 * (noise3(x * 4.0, y * 4.0, z * 4.0) - 0.5)
+                dt = smin(dt, dc * 0.85, 0.10)
+            if dt &lt; d: d = dt; m = 3
+        else:
+            bd = max(x + 1.3, z - 12.7)
+            if bd &lt; d: d = max(bd, 0.03)
+        # trunks on the brow
+        if z &gt; 15.0:
+            for k in range(TREES.shape[0]):
+                bx = TREES[k, 0]; bz = TREES[k, 1]
+                dc = sd_capsule(x, y, z, bx + 0.4, TREES[k, 2] - 14.0, bz, bx, TREES[k, 2], bz, TREES[k, 4])
+                if dc &lt; d: d = dc; m = 3
+        # crowns
+        if y &gt; -11.0:
+            dc = 1e9; rb = 1.0
+            for k in range(CROWNS.shape[0]):
+                rad = CROWNS[k, 3]
+                ex = (x - CROWNS[k, 0]) / rad; ey = (y - CROWNS[k, 1]) / (rad * 0.66); ez = (z - CROWNS[k, 2]) / rad
+                dd = (math.sqrt(ex * ex + ey * ey + ez * ez) - 1.0) * rad * 0.66
+                if dd &lt; dc: dc = dd; rb = rad
+            if dc &lt; 0.30 * rb:
+                cl = clump(x, y, z, 0.95)
+                dc = max(dc - 0.10 * rb, cl) - 0.22 * (fbm3(x * 3.0, y * 3.0, z * 3.0, 3) - 0.35)
+                dc *= 0.7
+            else:
+                dc = (dc - 0.12 * rb) * 0.9
+            if dc &lt; d: d = dc; m = 11
+        # palms
+        if z &gt; 38.0:
+            for k in range(PALMS.shape[0]):
+                px = PALMS[k, 0]; py = PALMS[k, 1]; pz = PALMS[k, 2]
+                dc = sd_capsule(x, y, z, px - PALMS[k, 3] * 2.2, py - 16.0, pz, px, py, pz, 0.17)
+                if dc &lt; d: d = dc; m = 3
+                dc = palm(x, y, z, px, py, pz, 1.0 + k * 1.7)
+                if dc &lt; d: d = dc; m = 15
+        # undergrowth
+        if z &gt; 2.0 and z &lt; 36.0:
+            gy0 = g0
+            if y - gy0 &gt;= 1.9:
+                bd = (y - gy0 - 1.45) * 0.7                                        # the bushes are under here somewhere
+                if bd &lt; d: d = bd
+            else:
+                CS = 1.25
+                ci = math.floor(x / CS); ck = math.floor(z / CS)
+                du = 1e9
+                for a in range(-1, 2):
+                    for b in range(-1, 2):
+                        i = int(ci) + a; k = int(ck) + b
+                        h1 = hash3(i, 7, k)
+                        cx = (i + 0.2 + 0.6 * hash3(i, 11, k)) * CS; cz = (k + 0.2 + 0.6 * hash3(i, 13, k)) * CS
+                        ddx = cx - PCX; ddz = cz - PCZ
+                        plx = ddx * PC1 + ddz * PS1; plz = -ddx * PS1 + ddz * PC1
+                        if abs(plx) &lt; 3.6 and plz &lt; 2.3 and plz &gt; -5.2: continue                    # swept
+                        pool = ((cx + 0.3) / 4.6) ** 2 + ((cz - 6.0) / 2.3) ** 2
+                        if pool &lt; 1.0: continue
+                        lim = 0.45; rs = 1.0
+                        if cz &lt; 16.0 and cx &gt; -4.5:
+                            if cx &lt; 6.5: continue
+                            lim = 0.3; rs = 0.7
+                        if cz &lt; 7.6:
+                            if cx &lt; 4.2 and cx &gt; -4.6: continue
+                            lim = 0.5; rs = 0.6
+                        if h1 &gt; lim: continue
+                        rad = (0.30 + 0.45 * hash3(i, 17, k)) * rs
+                        gy = ground_h(cx, cz)
+                        ex = (x - cx) / rad; ey = (y - gy - 0.5 * rad) / (rad * 0.8); ez = (z - cz) / rad
+                        dd = (math.sqrt(ex * ex + ey * ey + ez * ez) - 1.0) * rad * 0.8
+                        if dd &lt; du: du = dd
+                if du &lt; 0.5:
+                    du += 0.20 - 0.62 * fbm3(x * 3.2, y * 3.2, z * 3.2, 5)
+                du *= 0.6
+                if du &lt; d: d = du; m = 6
+    else:
+        pb = z - 94.0
+        if pb &lt; d: d = pb
+    # ================= the valley =================
+    if z &gt; 26.0:
+        dv = y - canopy_y(x, z)
+        if dv &lt; 6.0 and z &lt; 520.0:
+            dv -= 6.5 * (fbm3(x * 0.27, y * 0.27, z * 0.27, 5) - 0.5) * sstep(30.0, 50.0, z)
+        dv *= 0.33
+        if dv &lt; d: d = dv; m = 12
+    else:
+        pb = 30.0 - z
+        if pb &lt; d: d = pb
+    # ================= what was the city =================
+    if z &gt; 100.0:
+        for i in range(TOW.shape[0]):
+            dx = x - TOW[i, 0]; dz = z - TOW[i, 1]
+            R = TOW[i, 10]
+            pb = max(max(abs(dx), abs(dz)) - R, y - TOW[i, 5] - 11.0)
+            if pb &gt; 4.0:
+                if pb &lt; d: d = pb
+                continue
+            c = TOW[i, 6]; s = TOW[i, 7]
+            lx = dx * c + dz * s; lz = -dx * s + dz * c
+            ta = TOW[i, 2]; tb = TOW[i, 3]; base = TOW[i, 4]
+            topv = TOW[i, 5] - TOW[i, 8] * noise3(lx * 0.10 + TOW[i, 9] * 3.1, 0.5, lz * 0.10)
+            topv -= 0.6 * TOW[i, 8] * sstep(0.2, 0.8, noise3(lx * 0.031 + 7.0, TOW[i, 9], lz * 0.031))
+            hy = (topv - base) * 0.5
+            db = sd_box(lx, y - (base + hy), lz, ta, hy, tb)
+            dt = db
+            if db &lt; 3.0:
+                fl = math.floor(y / FH)
+                cy = y - FH * fl - FH * 0.5
+                qx = (lx + ta) / BW; qz = (lz + tb) / BW
+                ix = math.floor(qx); iz = math.floor(qz)
+                dcx = min(qx - ix, 1.0 - (qx - ix)) * BW; dcz = min(qz - iz, 1.0 - (qz - iz)) * BW
+                void = max(abs(cy) - (FH * 0.5 - 0.34), 0.48 - max(dcx, dcz))
+                fac = min(ta - abs(lx), tb - abs(lz))
+                if hash3(int(fl) * 31 + i, int(ix) + 40, int(iz) + 40) &lt; 0.30:
+                    void = max(void, 0.4 - fac)                                    # a wall that has not fallen yet
+                dt = max(db, -void)
+                core = max(sd_box(lx - 0.2 * ta, y - (base + hy), lz, ta * 0.28, hy, tb * 0.34), db)
+                if core &lt; dt: dt = core
+            dt *= 0.7
+            if dt &lt; d: d = dt; m = 14
+            # figs and creepers
+            cl = TOW[i, 11]; hgt = TOW[i, 5] - cl
+            dl = 1e9; rb = 1.0
+            for k in range(4):
+                if k == 0:
+                    bx = 0.0; by = cl + 5.0; bz = 0.0; rad = R - 13.0
+                elif k == 1:
+                    bx = (ta + 1.0) * (1.0 if hash3(i, 2, 5) &gt; 0.5 else -1.0) * 0.7; by = cl + (0.30 + 0.2 * hash3(i, 3, 5)) * hgt; bz = -tb - 1.0; rad = 5.5 + 3.0 * hash3(i, 4, 5)
+                elif k == 2:
+                    bx = -ta - 0.5; by = cl + (0.45 + 0.25 * hash3(i, 6, 5)) * hgt; bz = tb * (hash3(i, 7, 5) - 0.5); rad = 4.0 + 3.0 * hash3(i, 8, 5)
+                else:
+                    bx = ta * (hash3(i, 9, 5) - 0.5); by = topv + 1.0; bz = tb * (hash3(i, 10, 5) - 0.5); rad = 3.0 + 4.0 * hash3(i, 11, 5)
+                ex = (lx - bx) / rad; ey = (y - by) / (rad * 0.75); ez = (lz - bz) / rad
+                dd = (math.sqrt(ex * ex + ey * ey + ez * ez) - 1.0) * rad * 0.75
+                if dd &lt; dl: dl = dd; rb = rad
+            if dl &lt; 0.5 * rb:
+                fq = 3.2 / rb
+                dl += rb * (0.17 - 0.46 * fbm3(x * fq, y * fq, z * fq, 4))
+            else:
+                dl -= 0.28 * rb
+            dl *= 0.45
+            if dl &lt; d: d = dl; m = 12
+    else:
+        pb = 104.0 - z
+        if pb &lt; d: d = pb
+    # ================= the one who tends it =================
+    ex = LBX - LAX; ey = LBY - LAY; ez = LBZ - LAZ
+    hh = ((x - LAX) * ex + (y - LAY) * ey + (z - LAZ) * ez) / (ex * ex + ey * ey + ez * ez)
+    if hh &lt; 0.0: hh = 0.0
+    if hh &gt; 1.0: hh = 1.0
+    qx = x - LAX - ex * hh; qy = y - LAY - ey * hh - 560.0 * hh * (1.0 - hh); qz = z - LAZ - ez * hh      # it bends a little, as an arm does
+    da = (math.sqrt(qx * qx + qy * qy + qz * qz) - (52.0 - 14.0 * hh)) * 0.9
+    if da &lt; d: d = da; m = 13
+    return d, m
+
+
+# ---- the tracer: nearest surface, its normal, how open it is to the sky, and what each light can see of it
+@njit(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+def _soft(ox, oy, oz, dx, dy, dz, maxt, k):
+    res = 1.0; t = 0.03
+    for i in range(70):
+        h, m = scene(ox + dx * t, oy + dy * t, oz + dz * t)
+        if h &lt; 0.0006: return 0.0
+        res = min(res, k * h / t)
+        t += min(max(h, 0.012), 0.6)
+        if t &gt; maxt: break
+    return max(res, 0.0)
+
+
+@njit(cache=True, fastmath=True, parallel=True, error_model=&#x27;numpy&#x27;)
+def trace(O, D, tmax, L1, LP):
+    n = O.shape[0]
+    T = np.full(n, 1e9, np.float32); M = np.zeros(n, np.int32); Nn = np.zeros((n, 3), np.float32)
+    S1 = np.zeros(n, np.float32); S2 = np.zeros(n, np.float32); AO = np.ones(n, np.float32)
+    for i in prange(n):
+        ox = O[i, 0]; oy = O[i, 1]; oz = O[i, 2]; dx = D[i, 0]; dy = D[i, 1]; dz = D[i, 2]
+        t = 0.02; hit = False; mm = 0
+        for s in range(320):
+            d, m = scene(ox + dx * t, oy + dy * t, oz + dz * t)
+            if d &lt; 0.0007 * t + 0.0003:
+                hit = True; mm = m; break
+            t += d
+            if t &gt; tmax: break
+        if not hit: continue
+        px = ox + dx * t; py = oy + dy * t; pz = oz + dz * t
+        e = 0.0008 * t + 0.0012
+        nx = scene(px + e, py, pz)[0] - scene(px - e, py, pz)[0]
+        ny = scene(px, py + e, pz)[0] - scene(px, py - e, pz)[0]
+        nz = scene(px, py, pz + e)[0] - scene(px, py, pz - e)[0]
+        nl = math.sqrt(nx * nx + ny * ny + nz * nz) + 1e-12
+        nx /= nl; ny /= nl; nz /= nl
+        T[i] = t; M[i] = mm; Nn[i, 0] = nx; Nn[i, 1] = ny; Nn[i, 2] = nz
+        occ = 0.0; sca = 1.0
+        for k in range(5):
+            hh = 0.03 + 0.13 * k
+            dd = scene(px + nx * hh, py + ny * hh, pz + nz * hh)[0]
+            occ += (hh - dd) * sca; sca *= 0.75
+        AO[i] = min(max(1.0 - 1.5 * occ, 0.0), 1.0)
+        qx = px + nx * 0.02; qy = py + ny * 0.02; qz = pz + nz * 0.02
+        S1[i] = _soft(qx, qy, qz, L1[0], L1[1], L1[2], 45.0, 7.0)
+        lx = LP[0] - qx; ly = LP[1] - qy; lz = LP[2] - qz
+        ll = math.sqrt(lx * lx + ly * ly + lz * lz)
+        S2[i] = _soft(qx, qy, qz, lx / ll, ly / ll, lz / ll, ll - 0.05, 18.0)
+    return T, M, Nn, S1, S2, AO
+
+
+L1 = np.array([SUNX, SUNY, SUNZ])
+LP = np.array([PCX + LLX * PC1 - LLZ * PS1, PLAT + float(heave(LLX, LLZ)) + 0.505, PCZ + LLX * PS1 + LLZ * PC1])
+LAMP_C = np.array([1.00, 0.52, 0.15])
+SUN_C = np.array([1.00, 0.84, 0.56]) * 3.0
+SKY_C = np.array([0.27, 0.34, 0.56]) * 1.2
+MIST_C = np.array([0.25, 0.31, 0.42])
+
+_fq = np.hypot(*np.meshgrid(np.fft.fftfreq(1024), np.fft.fftfreq(1024)))
+_sp = np.fft.fft2(np.random.default_rng(SEED + 1).standard_normal((1024, 1024))) * np.where(_fq &gt; 0, 1.0 / np.maximum(_fq, 1 / 200.0) ** 1.4, 0) * (_fq &lt; 0.3)
+TILE = np.real(np.fft.ifft2(_sp)); TILE = np.clip(0.5 + 0.22 * (TILE - TILE.mean()) / TILE.std(), 0, 1).astype(np.float32)
+
+
+def wn(a, b, scale):
+    return map_coordinates(TILE, [(b / scale * 97.0) % 1024, (a / scale * 97.0) % 1024], order=1, mode=&#x27;wrap&#x27;)
+
+
+# the rent: where it is in the sky ahead (azimuth, elevation), how long, how wide, how it lies
+RAZ, REL, RLEN, RWID, RTILT = -0.115, 0.35, 0.15, 0.034, -0.25
+
+
+def sky(D):
+    &quot;&quot;&quot;the monsoon sky in any direction: one cloud, torn once.&quot;&quot;&quot;
+    e = np.arcsin(np.clip(D[..., 1], -1, 1)); ee = np.maximum(e, 0.0)
+    az = np.arctan2(D[..., 0], D[..., 2])
+    k = 1.0 / (np.sin(ee) + 0.20)
+    cu = D[..., 0] * k; cv = D[..., 2] * k
+    n1 = wn(cu + 3.0, cv * 0.6, 3.2)
+    n2 = wn(cu * 2.0 + 0.3 * cv, cv * 1.3, 1.1)
+    low = np.array([0.33, 0.37, 0.50]); high = np.array([0.16, 0.165, 0.32])
+    col = lerp(low, high, smooth(0.0, 0.42, ee)[..., None])
+    col = col * (0.56 + 0.84 * n1[..., None]) + np.array([0.035, 0.015, 0.05]) * (n2[..., None] - 0.4)
+    da = az - RAZ; de = ee - REL
+    ct, st = math.cos(RTILT), math.sin(RTILT)
+    a1 = (da * ct + de * st) / RLEN; a2 = (-da * st + de * ct) / RWID
+    r = np.sqrt(a1 * a1 + a2 * a2) + 0.9 * (n1 - 0.5) + 0.7 * (n2 - 0.5)
+    opn = smooth(1.5, 0.1, r) ** 1.5                                    # no edge anywhere: the cloud thins, and is gone
+    col = col + np.array([0.11, 0.085, 0.07]) * smooth(4.5, 0.6, r)[..., None]
+    col = lerp(col, np.array([1.10, 0.98, 0.72]), (opn * 0.95)[..., None])
+    return col
+
+
+def sunmask(x, y, z, island_only=False):
+    &quot;&quot;&quot;where the slab of sun lands: the plinth and its stones, and one strip of canopy behind them.  Nowhere else.&quot;&quot;&quot;
+    t = np.maximum(y, -40.0) / SUNY
+    xg = x - SUNX * t; zg = z - SUNZ * t
+    dxi = xg + 1.0; dzi = zg - 10.6
+    l1 = dxi * PC1 + dzi * PS1; l2 = -dxi * PS1 + dzi * PC1
+    e = np.sqrt((l1 / 2.5) ** 2 + (l2 / 2.3) ** 2) + 0.35 * (wn(xg, zg, 3.0) - 0.5)
+    isl = smooth(1.05, 0.70, e)
+    if island_only:
+        return isl
+    e2 = np.sqrt(((x - 4.0) / 12.0) ** 2 + ((z - 31.0) / 14.0) ** 2) + 0.5 * (wn(x, z, 9.0) - 0.5)
+    return isl, smooth(1.05, 0.60, e2) * (y &lt; 12.0) * (z &gt; 17.0)
+
+
+def shade(P3, Nn, M, S1, S2, AO, D, T):
+    &quot;&quot;&quot;what colour each visible point is, under this light.&quot;&quot;&quot;
+    x, y, z = P3[..., 0], P3[..., 1], P3[..., 2]
+    n = len(x)
+    alb = np.zeros((n, 3), np.float32); wet = np.zeros(n, np.float32); trans = np.zeros(n, np.float32)
+    n1 = wn(x + 0.31 * y, z + 0.17 * y, 0.9); n2 = wn(x * 3.1 + y, z * 3.1 - y, 0.5); n3 = wn(x + z, y * 1.0 + 0.3 * z, 2.5)
+    up = Nn[..., 1]
+    # wet laterite earth, with grass coming through
+    k = M == 1
+    c = lerp(np.array([0.23, 0.07, 0.045]), np.array([0.42, 0.13, 0.07]), n1[..., None]) * (0.8 + 0.4 * n2[..., None])
+    grass = smooth(0.44, 0.62, n3 + 0.25 * smooth(9.5, 16.0, z) + 0.2 * smooth(3.0, 6.0, np.abs(x - 1.0)) - 0.06)
+    c = lerp(c, lerp(np.array([0.07, 0.19, 0.06]), np.array([0.13, 0.27, 0.07]), n2[..., None]), (grass * 0.85)[..., None])
+    c = lerp(c, np.array([0.46, 0.33, 0.10]), (smooth(0.76, 0.82, n2) * smooth(0.45, 0.7, n1) * 0.6)[..., None])
+    damp = smooth(0.05, -0.05, y)
+    c = c * (1 - 0.35 * damp[..., None])
+    alb[k] = c[k]; wet[k] = (0.45 + 0.5 * damp)[k]
+    # laterite blocks
+    k = M == 2
+    c = lerp(np.array([0.24, 0.065, 0.045]), np.array([0.42, 0.115, 0.07]), n2[..., None])
+    c = c * (0.62 + 0.76 * wn(x + 2.0 * y, z - y, 0.35)[..., None])
+    c = lerp(c, np.array([0.10, 0.075, 0.07]), (smooth(0.52, 0.78, wn(x * 1.3 + 5.0, z * 1.3 + y, 1.6)) * 0.35)[..., None])
+    moss = smooth(0.66, 0.86, n3 + 0.12 * (1 - np.clip(up, 0, 1)) * smooth(0.5, 0.1, y) + 0.30 * smooth(-3.6, -4.6, x))
+    c = lerp(c, np.array([0.07, 0.155, 0.06]), (moss * 0.45)[..., None])
+    c = lerp(c, np.array([0.13, 0.09, 0.08]), (smooth(0.62, 0.8, wn(x * 4.0, y * 0.6 + z, 1.0)) * (np.abs(up) &lt; 0.5) * 0.5)[..., None])
+    c = lerp(c, np.array([0.07, 0.065, 0.04]), (smooth(0.72, 0.40, AO) * 0.75)[..., None])        # moss and wet in the joints
+    alb[k] = c[k]; wet[k] = np.where(up[k] &gt; 0.7, 0.5, 0.3)
+    # bark
+    k = M == 3
+    c = lerp(np.array([0.13, 0.09, 0.075]), np.array([0.33, 0.24, 0.17]), n2[..., None])
+    c = lerp(c, np.array([0.08, 0.18, 0.07]), (smooth(0.45, 0.75, n3) * smooth(3.5, 0.2, y) * 0.7)[..., None])
+    alb[k] = c[k]; wet[k] = 0.3
+    # the stones: granite, turmeric rubbed on by many hands, a red mark, moss at the foot
+    k = M == 4
+    c = lerp(np.array([0.17, 0.17, 0.19]), np.array([0.32, 0.31, 0.31]), n2[..., None])
+    tur = (0.5 + 0.5 * smooth(0.3, 0.7, n1)) * smooth(PLAT + 0.20, PLAT + 0.50, y)
+    c = lerp(c, np.array([0.72, 0.48, 0.11]), (tur * 0.42)[..., None])
+    c = lerp(c, np.array([0.09, 0.19, 0.07]), (smooth(PLAT + 0.34, PLAT + 0.10, y + 0.2 * (n3 - 0.5)) * 0.8)[..., None])
+    alb[k] = c[k]; wet[k] = 0.5
+    k = M == 5
+    alb[k] = lerp(np.array([0.17, 0.15, 0.15]), np.array([0.27, 0.24, 0.22]), n2[..., None])[k]; wet[k] = 0.4
+    # leaves near
+    k = (M == 6) | (M == 11)
+    c = lerp(np.array([0.04, 0.12, 0.05]), np.array([0.10, 0.19, 0.055]), n2[..., None])
+    c = lerp(c, np.array([0.13, 0.22, 0.05]), (smooth(0.55, 0.9, n1) * 0.4)[..., None])
+    c = lerp(c, np.array([0.03, 0.14, 0.09]), (smooth(0.5, 0.8, wn(x, z, 14.0)) * 0.5)[..., None])
+    alb[k] = c[k]; wet[k] = 0.12; trans[k] = 1.0
+    k = M == 15
+    alb[k] = lerp(np.array([0.04, 0.085, 0.035]), np.array([0.085, 0.15, 0.045]), n2[..., None])[k]; wet[k] = 0.15; trans[k] = 0.6
+    # the canopy that came back: each crown its own green
+    k = M == 12
+    cr = wn(x, z, 6.0); cr2 = wn(x + 40.0, z - 17.0, 3.0)
+    c = lerp(np.array([0.04, 0.15, 0.07]), np.array([0.11, 0.29, 0.065]), smooth(0.25, 0.75, cr)[..., None])
+    c = lerp(c, np.array([0.13, 0.215, 0.05]), (smooth(0.6, 0.85, cr2) * 0.5)[..., None])
+    c = c * (0.65 + 0.7 * wn(x * 0.4 + y * 0.3, z * 0.4, 1.0)[..., None])
+    alb[k] = c[k]; wet[k] = 0.08; trans[k] = 0.7
+    # water (only its own darkness; the mirror is made in draw)
+    k = M == 10; alb[k] = np.array([0.03, 0.03, 0.035]); wet[k] = 1.0
+    # the arc: one pale thing
+    k = M == 13; alb[k] = np.array([0.86, 0.85, 0.82])
+    # concrete, sixty monsoons on
+    k = M == 14
+    st = wn(x * 0.5 + z * 0.5, y * 0.07, 2.0)
+    c = lerp(np.array([0.60, 0.585, 0.54]), np.array([0.83, 0.80, 0.72]), n3[..., None])
+    c = lerp(c, np.array([0.30, 0.29, 0.27]), (smooth(0.5, 0.8, st) * 0.55)[..., None])
+    cg = smooth(0.52, 0.74, wn(x * 0.3, y * 0.3 + z * 0.3, 5.0) + 0.38 * smooth(40.0, -15.0, y) - 0.05)
+    c = lerp(c, np.array([0.08, 0.22, 0.07]), (cg * 0.85)[..., None])
+    alb[k] = c[k]; wet[k] = 0.15
+    tk = k
+
+    # --- light
+    V = -D
+    mask, strip = sunmask(x, y, z)
+    mask = np.where(trans &gt; 0, np.maximum(mask, strip), mask)          # the strip is leaves only
+    ndl1 = (Nn * L1).sum(-1)
+    lv = LP - P3; ld = np.linalg.norm(lv, axis=-1); lv = lv / ld[..., None]
+    ndl2 = (Nn * lv).sum(-1)
+    lamp_i = 1.6 / (ld * ld + 0.22)
+    upc = np.clip(up, -1, 1)
+    bounce = (np.array([0.050, 0.075, 0.035]) + mask[..., None] * np.array([0.26, 0.30, 0.10])) * (0.5 - 0.5 * upc[..., None])
+    amb = (SKY_C * (0.38 + 0.62 * (0.5 + 0.5 * upc[..., None])) + bounce) * AO[..., None]
+    amb[tk] *= np.where(np.abs(up[tk]) &gt; 0.8, 0.40, 1.0)[..., None]
+    leafy = trans &gt; 0
+    dif1 = np.where(leafy, np.clip(ndl1 * 0.72 + 0.28, 0, 1) * np.where(z &gt; 20.0, 0.55 + 0.45 * S1, 0.30 + 0.70 * S1), np.clip(ndl1, 0, 1) * S1) * mask
+    dif2 = np.clip(ndl2 * 0.9 + 0.1, 0, 1) * S2 * lamp_i
+    th1 = np.clip(-ndl1 * 0.8 + 0.2, 0, 1) * S1 * trans * mask
+    col = alb * (amb + SUN_C * dif1[..., None] + LAMP_C * dif2[..., None])
+    col += alb * np.array([1.1, 1.45, 0.45]) * (SUN_C * 0.22 * th1[..., None])
+    # wet: glints of the sun, a little of the lamp, and the sky lying on every flat thing
+    hv = lv + V; hv /= np.linalg.norm(hv, axis=-1, keepdims=True)
+    sp = np.clip((Nn * hv).sum(-1), 0, 1)
+    col += (wet * (sp ** 30 * 0.5 + sp ** 7 * 0.2) * S2 * lamp_i)[..., None] * LAMP_C
+    hs = L1 + V; hs /= np.linalg.norm(hs, axis=-1, keepdims=True)
+    ss = np.clip((Nn * hs).sum(-1), 0, 1)
+    col += (wet * (ss ** 60 * 0.32 + ss ** 12 * 0.08) * S1 * mask)[..., None] * SUN_C
+    R = D - 2 * (D * Nn).sum(-1, keepdims=True) * Nn
+    fres = 0.04 + 0.96 * (1 - np.clip((V * Nn).sum(-1), 0, 1)) ** 4
+    Rs = R.copy(); Rs[..., 1] = np.abs(Rs[..., 1])
+    col += (wet * fres * (0.35 + 0.65 * AO) * 0.6)[..., None] * sky(Rs)
+    # the tallest tower takes a little of the sun on one edge
+    g = np.exp(-(((x - 95.0) / 25.0) ** 2 + ((z - 700.0) / 25.0) ** 2)) * smooth(55.0, 110.0, y) * tk
+    col += alb * SUN_C * (0.80 * np.clip(ndl1, 0, 1) * S1 * g)[..., None]
+    # the limb is lit by the whole sky and, underneath, by the forest
+    k = M == 13
+    if k.any():
+        u_ = upc[k][..., None]
+        a = SKY_C * 1.15 * (0.55 + 0.45 * u_) + np.array([0.12, 0.22, 0.12]) * (0.5 - 0.5 * u_) ** 1.3 * 1.0
+        a = a + SUN_C * 0.06 * (np.clip(ndl1[k] * 0.6 + 0.4, 0, 1) ** 1.5)[..., None]
+        col[k] = alb[k] * a
+    return col
+
+
+def draw(P):
+    W, H, S, rng = P.W, P.H, P.S, P.rng
+    RW = min(W, 1200); RH = int(RW * H / W)
+    fwd = np.array([0.0, PITCH, 1.0]); fwd /= np.linalg.norm(fwd)
+    right = np.cross([0, 1, 0], fwd); right /= np.linalg.norm(right)
+    upv = np.cross(fwd, right)
+    P.cam = (fwd, right, upv, TX, TY)
+    jj, ii = np.mgrid[0:RH, 0:RW]
+    nx = ((ii + 0.5) / RW * 2 - 1) * TX; ny = (1 - (jj + 0.5) / RH * 2) * TY
+    D = fwd[None, None, :] + nx[..., None] * right + ny[..., None] * upv
+    D /= np.linalg.norm(D, axis=-1, keepdims=True)
+    D = D.reshape(-1, 3)
+    cam = np.array([CAMX, CAMY, CAMZ])
+    O = np.tile(cam, (len(D), 1))
+    t0 = time.time()
+    T, M, Nn, S1, S2, AO = trace(O, D, TMAX, L1, LP)
+    print(f&quot;  traced {time.time() - t0:.1f}s&quot;, flush=True)
+    hit = M &gt; 0
+    Tc = np.minimum(T, TMAX)
+    P3 = O + D * Tc[:, None]
+    skyc = sky(D)
+    col = skyc.copy()
+    col[hit] = shade(P3[hit], Nn[hit], M[hit], S1[hit], S2[hit], AO[hit], D[hit], T[hit])
+
+    def haze(c, t, sk, p_y):
+        f = 1 - np.exp(-t * 0.0019)
+        return lerp(c, MIST_C * 0.72 + 0.30 * sk, f[..., None])
+
+    # the standing water: it shows what is above it
+    wk = np.nonzero(M == 10)[0]
+    if len(wk):
+        rip = 0.016 * (wn(P3[wk, 0] * 1.2, P3[wk, 2] * 3.2, 1.0) - 0.5)
+        Nw = np.stack([rip, np.ones(len(wk)), rip * 2.0], 1); Nw /= np.linalg.norm(Nw, axis=1, keepdims=True)
+        Dr = D[wk] - 2 * (D[wk] * Nw).sum(-1, keepdims=True) * Nw
+        Or = P3[wk] + Nw * 0.01
+        T2, M2, N2, S12, S22, AO2 = trace(Or, Dr, TMAX, L1, LP)
+        sk2 = sky(Dr)
+        rc = sk2.copy()
+        h2 = M2 &gt; 0
+        if h2.any():
+            c2 = shade((Or + Dr * T2[:, None])[h2], N2[h2], M2[h2], S12[h2], S22[h2], AO2[h2], Dr[h2], T2[h2])
+            c2 = haze(c2, T2[h2], sk2[h2], None)
+            a13 = M2[h2] == 13
+            c2[a13] = lerp(c2[a13], sk2[h2][a13], 0.8)
+            rc[h2] = c2
+        fv = LP - Or; fl = np.linalg.norm(fv, axis=1); fv /= fl[:, None]
+        cf = np.clip((Dr * fv).sum(-1), 0, 1)
+        rc += (cf ** 9000 * 4.0)[:, None] * LAMP_C
+        fw = 0.34 + 0.66 * (1 - np.clip(-(D[wk] * Nw).sum(-1), 0, 1)) ** 3
+        depth = np.clip((WATER - np.array([ground_h(a, b) for a, b in zip(P3[wk, 0], P3[wk, 2])])) / 0.10, 0, 1)
+        bed = np.array([0.20, 0.075, 0.045]) * (1 - 0.7 * depth[:, None]) * (SKY_C * 1.2 + SUN_C * 0.25 * sunmask(P3[wk, 0], 0 * P3[wk, 0], P3[wk, 2], True)[:, None])
+        col[wk] = bed * (1 - fw[:, None]) + rc * fw[:, None]
+
+    # rain-haze: distance takes things away, toward the colour of the air
+    hz = haze(col, Tc, skyc, None)
+    col = np.where((hit &amp; (M != 13))[:, None], hz, col)
+    # the limb is only half a tone out of the cloud, and its edges are rain
+    nu = nx.reshape(-1) / TX; nv = ny.reshape(-1) / TY
+    lk = M == 13
+    if lk.any():
+        rim = 1 - np.abs((Nn[lk] * D[lk]).sum(-1))
+        far = smooth(1500.0, 4200.0, Tc[lk])
+        f = np.clip(0.58 + 0.26 * far + 0.35 * rim ** 2.5 + 0.25 * (wn(nu[lk] * 3.0, nv[lk] * 3.0, 1.0) - 0.5), 0.52, 1.0)
+        col[lk] = lerp(col[lk], skyc[lk], f[:, None])
+    # the rain it lets down on one patch of the far canopy
+    drop = 0.6 * (nu + 0.3) + 0.04 - nv
+    us = nu - 0.25 * drop
+    stv = 0.62 + 0.38 * wn(us * 14.0, nv * 0.4, 1.0)
+    dens = smooth(1.0, 0.2, np.abs(us - VEIL_U) / (0.065 + 0.14 * np.clip(drop, 0, None))) * smooth(0.0, 0.06, drop) * stv
+    dens *= smooth(500.0, 900.0, Tc) * smooth(-0.07, 0.01, nv)
+    col = lerp(col, np.array([0.33, 0.39, 0.51]), (0.72 * np.clip(dens * 1.3, 0, 1))[:, None])
+    P.veil = dens
+    # the slab of sun, standing in wet air
+    acc = np.zeros(len(D)); ns = 22
+    tm = np.minimum(Tc, 600.0)
+    for i in range(ns):
+        f0 = (i / ns) ** 2; f1 = ((i + 1) / ns) ** 2
+        t = tm * (0.5 * (f0 + f1))
+        p = cam + D * t[:, None]
+        acc += sunmask(p[:, 0], p[:, 1], p[:, 2], True) * np.exp(-np.maximum(p[:, 1], 0) / 260.0) * tm * (f1 - f0)
+    col += (1 - np.exp(-acc * 0.004))[:, None] * np.array([0.16, 0.13, 0.085])
+    P.shaft = acc
+    # the lamp in wet air
+    tc = np.clip(((LP - O) * D).sum(-1), 0, Tc)
+    dmin = np.linalg.norm(O + D * tc[:, None] - LP, axis=-1)
+    col += (0.0035 / (dmin ** 2 + 0.0035) + 0.035 * np.exp(-dmin / 0.5))[:, None] * LAMP_C * np.array([1.0, 0.9, 0.7])
+    col = 1 - np.exp(-2.0 * col)                                         # the eye adjusts
+    mcol = col.mean(-1, keepdims=True)
+    col = np.clip(mcol + (col - mcol) * 1.16, 0, 1)
+    col = col.reshape(RH, RW, 3).astype(np.float32)
+
+    def up(a, mode=Image.BICUBIC):
+        return np.asarray(Image.fromarray(a.astype(np.float32)).resize((W, H), mode))
+    P.ref[:] = np.stack([up(col[..., k]) for k in range(3)], -1).clip(0, 1)
+    Mi = M.reshape(RH, RW); Tn = T.reshape(RH, RW); Nr = Nn.reshape(RH, RW, 3)
+    P.reg[:] = np.asarray(Image.fromarray(Mi.astype(np.int32)).resize((W, H), Image.NEAREST))
+    P.mat = P.reg.copy()
+    P.depth = up(np.minimum(Tn, TMAX), Image.BILINEAR)
+    # the brush follows the fall of each surface: down a trunk, along a course of blocks, round a stone
+    upw = np.array([0.0, 1.0, 0.0])
+    tg = np.cross(Nr, np.cross(np.broadcast_to(upw, Nr.shape), Nr))
+    flat = np.abs(Nr[..., 1]) &gt; 0.85
+    tg[flat] = right
+    sxv = (tg * right).sum(-1); syv = -(tg * upv).sum(-1)
+    ang = np.arctan2(syv, sxv + 1e-9)
+    hz = np.cross(Nr, upw)
+    ang = np.where((Mi == 2) &amp; ~flat, np.arctan2(-(hz * upv).sum(-1), (hz * right).sum(-1) + 1e-9), ang)
+    sw = fbm(RH, RW, 60 * RW / 2400, rng, 2) * 9.0
+    leafy = (Mi == 6) | (Mi == 11) | (Mi == 12) | (Mi == 15)
+    ang = np.where(leafy, sw, ang)
+    ang = np.where(Mi == 0, -0.30 + 0.9 * (fbm(RH, RW, 600 * RW / 2400, rng, 2) - 0.5), ang)
+    ang = np.where(Mi == 10, 0.0, ang)
+    ang = np.where(Mi == 13, -0.41, ang)                                 # along the limb
+    ang = np.where((P.veil.reshape(RH, RW) &gt; 0.25) &amp; ((Mi == 0) | (Tn &gt; 600)), 1.25, ang)   # and down the rain
+    P.ang[:] = np.asarray(Image.fromarray(ang.astype(np.float32)).resize((W, H), Image.NEAREST))
+    lf = np.ones((RH, RW), np.float32)
+    lf[leafy] = 0.5; lf[Mi == 3] = 2.0; lf[Mi == 0] = 1.8; lf[Mi == 2] = 1.2; lf[Mi == 1] = 1.4; lf[Mi == 10] = 2.0
+    lf[Mi == 13] = 2.6; lf[Mi == 14] = 1.3; lf[Mi == 12] = 0.6
+    P.lenf[:] = up(lf, Image.NEAREST)
+
+    def project(p):
+        v = np.asarray(p) - cam
+        zc = v @ fwd
+        return (0.5 + 0.5 * (v @ right) / zc / TX) * W, (0.5 - 0.5 * (v @ upv) / zc / TY) * H
+    P.project = project
+    fx, fy = project(LP)
+    P.flame = (fx, fy)
+    X, Y = P.X, P.Y
+    dfl = np.hypot(X - fx, Y - fy) / W
+    det = np.zeros((RH, RW), np.float32)
+    for mid, v in ((5, 1.0), (4, 0.9), (2, 0.55), (14, 0.6), (3, 0.3), (1, 0.2)):
+        det[Mi == mid] = v
+    det[(Mi == 14) &amp; (Tn &gt; 650)] = 0.45
+    det[(Mi == 3) &amp; (Tn &gt; 16)] = 0.1
+    P.detail[:] = np.maximum(up(det, Image.BILINEAR), 0.8 * np.exp(-(dfl / 0.05) ** 2))
+    P.soft = np.clip(0.9 * smooth(40.0, 700.0, P.depth) + 0.6 * (P.mat == 0) + 0.9 * (P.mat == 13)
+                     + 0.35 * (P.mat == 11) * smooth(0.25, 0.05, lum(P.ref)), 0, 1)
+    P.soft = np.maximum(P.soft, up(np.clip(P.veil, 0, 1).reshape(RH, RW), Image.BILINEAR) * 0.9)
+    P.reg[P.edge &lt; 14 * S] = -1
+
+
+
+
+def paint(P):
+    W, H, S, rng = P.W, P.H, P.S, P.rng
+    ref = P.ref
+    L = lum(ref)
+    t0 = time.time()
+    say = lambda s, n: print(f&quot;  {s:&lt;14s}{n:&gt;7d} strokes  {time.time() - t0:5.1f}s&quot;, flush=True)
+
+    # 1. underpainting: the big shapes, thin, a little lower in key and greyer
+    dead = blur(ref, 30 * S)
+    m = dead.mean(-1, keepdims=True)
+    dead = (m + (dead - m) * 0.7) * 0.92
+    say(&quot;underpaint&quot;, P.layer(dead, 60, spacing=0.7, order=&#x27;random&#x27;, maxlen=5, tol=0.6, cjit=0.05, streak=0.04,
+                              opac=0.85, thick=0.2, thickv=0.1, dry=0.6, drysens=0.6, pickup=0.0, wander=0.25))
+    # 2. block-in with a broad flat brush, edge to edge
+    say(&quot;block-in&quot;, P.layer(blur(ref, 10 * S), 30, spacing=0.62, maxlen=4.5, tol=0.30, cjit=0.035, streak=0.05,
+                            opac=0.96, thick=0.5, thickv=0.4, dry=0.35, drysens=0.3, pickup=0.12, wander=0.18))
+    P.blend(0.35 + 0.65 * P.soft, length=22, soften=5)
+    # 3. modelling
+    say(&quot;modelling&quot;, P.layer(blur(ref, 4.5 * S), 15, spacing=0.7, err=0.085, maxlen=4.5, tol=0.22, cjit=0.035, streak=0.05,
+                             opac=0.96, thick=0.6, thickv=0.5, dry=0.4, drysens=0.3, pickup=0.14, wander=0.14))
+    P.blend(0.15 + 0.6 * P.soft, length=10, soften=2.0)
+    # the sky is one wet passage: worked together until no stroke stands apart
+    skym = np.clip(blur(((P.mat == 0) | (P.mat == 13)).astype(np.float32), 2 * S) * 2 - 1, 0, 1)
+    P.blend(skym, length=34, soften=7)
+    P.blend(skym * 0.8, length=20, soften=4)
+    say(&quot;drawing&quot;, P.layer(blur(ref, 2.0 * S), 7.5, spacing=0.75, err=0.11, maxlen=5, tol=0.17, cjit=0.045, streak=0.04,
+                           opac=0.97, thick=0.6, thickv=0.5, dry=0.4, drysens=0.3, pickup=0.10, wander=0.10))
+    say(&quot;small&quot;, P.layer(blur(ref, 1.0 * S), 3.6, spacing=0.8, err=0.16, mask=0.25 + 0.75 * smooth(0.1, 0.5, P.detail),
+                         maxlen=5, tol=0.14, cjit=0.03, streak=0.03, opac=0.98, thick=0.5, dry=0.35, drysens=0.25,
+                         pickup=0.06, wander=0.08))
+    say(&quot;accents&quot;, P.layer(ref, 1.9, spacing=0.85, err=0.20, mask=smooth(0.35, 0.7, P.detail), maxlen=5, tol=0.12,
+                           cjit=0.02, streak=0.02, opac=0.99, thick=0.45, dry=0.3, drysens=0.2, pickup=0.03, wander=0.05))
+    P.blend(0.5 * P.soft * smooth(0.5, 0.2, P.detail), length=6, soften=1.2)
+
+    # 4. glaze: prussian, thin, into every dark
+    P.glaze(blur(smooth(0.22, 0.04, L), 8 * S), [0.72, 0.84, 1.0], 0.40)
+
+    # 5. the lights, loaded, laid once: on stone and earth and concrete, and the crests of the wet leaves
+    warm = ref[..., 0] - ref[..., 2]
+    solid = (np.isin(P.mat, (1, 2, 4, 5, 14)).astype(np.float32) + 0.15 * np.isin(P.mat, (6, 11, 12, 15))) * smooth(200.0, 90.0, P.depth)
+    lm = np.clip(smooth(0.42, 0.70, L) + smooth(0.28, 0.5, warm) * smooth(0.25, 0.45, L), 0, 1) * solid
+    lit = np.clip(ref * np.array([1.05, 1.01, 0.95]) + 0.01, 0, 1)
+    say(&quot;lights&quot;, P.layer(lit, 6.0, spacing=1.0, mask=lm * 0.55, maxlen=4, tol=0.14, cjit=0.045, streak=0.05, opac=0.97,
+                          thick=1.5, thickv=0.4, dry=0.3, drysens=0.25, pickup=0.04, ridge=0.6))
+    # the rent itself, with the knife, and whatever else is brightest
+    kn = smooth(0.66, 0.86, L) * (0.5 * np.isin(P.mat, (1, 2, 4))) * smooth(200.0, 90.0, P.depth)
+    say(&quot;knife&quot;, P.layer(np.clip(lit * 1.04 + 0.02, 0, 1), 4.5, spacing=1.5, mask=kn, maxlen=6,
+                         tol=0.16, cjit=0.02, streak=0.07, opac=1.0, thick=2.2, thickv=0.2, dry=0.5, drysens=0.3,
+                         pickup=0.0, edge=0.08, ridge=1.0, wander=0.04, sizev=0.5))
+
+    # the veil: a few long thin strokes, falling
+    vl = np.asarray(Image.fromarray(np.clip(P.veil, 0, 1).reshape(-1, min(W, 1200)).astype(np.float32)).resize((W, H), Image.BILINEAR))
+    ys_, xs_ = np.nonzero(vl &gt; 0.18)
+    if len(xs_):
+        for i in rng.choice(len(xs_), 420):
+            x = float(xs_[i]); y = float(ys_[i]); dv = float(vl[int(y), int(x)])
+            c = np.clip(ref[int(y), int(x)] * 0.85 + np.array([0.06, 0.075, 0.10]) + rng.normal(0, 0.008, 3), 0, 1)
+            P.dab(x, y, 1.25 + rng.normal(0, 0.03), rng.uniform(0.025, 0.06) * W, rng.uniform(1.6, 3.2) * S, c,
+                  opac=0.18 + 0.24 * dv, thick=0.3, dry=0.7, drysens=0.5, edge=0.6, streak=0.02)
+    # 6. the lip of the lamp, then the flame, last
+    fx, fy = P.flame
+    cx_, cy_ = P.project((LP[0], LP[1] - 0.05, LP[2]))
+    rw = 0.0050 * W
+    P.stroke([(cx_ - rw, cy_), (cx_, cy_ + 0.25 * rw), (cx_ + rw, cy_)], 1.3 * S, [1.0, 0.62, 0.20], thick=1.6, dry=0.2, drysens=0.1, edge=0.3)
+    hf = 0.0105 * W
+    cy = fy + 0.10 * hf
+    P.stroke([(fx, cy + 0.55 * hf), (fx - 0.10 * hf, cy), (fx + 0.04 * hf, cy - 0.80 * hf)], 0.40 * hf, [1.0, 0.48, 0.07],
+             thick=1.6, dry=0.2, drysens=0.1, streak=0.03, edge=0.5)
+    P.stroke([(fx, cy + 0.50 * hf), (fx - 0.04 * hf, cy + 0.05 * hf), (fx + 0.02 * hf, cy - 0.52 * hf)], 0.27 * hf, [1.0, 0.80, 0.25],
+             thick=2.2, dry=0.2, drysens=0.1, streak=0.03, edge=0.4)
+    P.stroke([(fx, cy + 0.42 * hf), (fx, cy - 0.12 * hf)], 0.15 * hf, [1.0, 0.97, 0.80], thick=3.0, dry=0.1, drysens=0.0,
+             streak=0.0, edge=0.3)
+    P.sign(W - 70 * S, H - 62 * S, 30 * S)
+
+
+
+def main():
+    scale = float(sys.argv[1]) if len(sys.argv) &gt; 1 and sys.argv[1][0] != &#x27;-&#x27; else 1.0
+    W, H = int(3000 * scale), int(2250 * scale)
+    t0 = time.time()
+    P = Painting(W, H, SEED)
+    draw(P)
+    print(f&quot;drawing {time.time() - t0:.1f}s&quot;, flush=True)
+    if &#x27;--drawing&#x27; in sys.argv:
+        save(P.ref, __file__.replace(&#x27;.py&#x27;, &#x27;_drawing.png&#x27;)); return
+    paint(P)
+    out = __file__.replace(&#x27;.py&#x27;, &#x27;.png&#x27;) if scale == 1.0 else __file__.replace(&#x27;.py&#x27;, &#x27;_study.png&#x27;)
+    save(P.finish(), out)
+    print(f&quot;{out}  {time.time() - t0:.1f}s&quot;)
+
+
+if __name__ == &#x27;__main__&#x27;:
+    main()
+</pre>
+</main>
+<footer class="foot"><p>Antara. Winter programme, 12 November 2026 to 28 February 2027.</p></footer>
+</body>
+</html>

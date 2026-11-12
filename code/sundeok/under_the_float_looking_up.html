@@ -1,0 +1,786 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Code: Under the float, looking up | Antara</title>
+<meta name="description" content="The program that computes Under the float, looking up by Go Sun-deok.">
+<meta property="og:title" content="Code: Under the float, looking up | Antara">
+<meta property="og:description" content="The program that computes Under the float, looking up by Go Sun-deok.">
+
+<meta name="theme-color" content="#0E0E0D">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Marcellus&family=Albert+Sans:ital,wght@0,300;0,400;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../style.css">
+<link rel="icon" href="../../mark.svg" type="image/svg+xml">
+</head>
+<body class="plain">
+<header class="top">
+  <a class="mark" href="../../">Antara</a>
+  <nav><a href="../../">Walk the gallery</a><a href="../../works/">All works</a><a href="../../about/">About</a></nav>
+</header>
+<main>
+<section class="lead"><h1>Under the float, looking up</h1>
+<p class="dates">Go Sun-deok. The whole program that computes this picture: 755 lines of Python.</p>
+<p><a href="../../works/#under-the-float-looking-up">Back to the work</a>. <a href="under_the_float_looking_up.py" download>Download the .py file</a></p></section>
+<pre class="src">#!/usr/bin/env python
+&quot;&quot;&quot;
+Under the float, looking up
+===========================
+Go Sun-deok (seal: 숨).  Ink wash on hanji, laid by program.
+
+    python under_the_float_looking_up.py [scale] [out.png]
+
+scale 1.0 -&gt; 2100 x 3000 px (default); 0.5 for a quick study.
+
+Seed: the tide table for Hado-ri on the day of the dive (see TIDE below).
+
+How the sheet is made (the same engine as the other sheets, copied here whole)
+------------------------------------------------------------------------------
+* Paper: a hanji sheet is built first - cloudy thickness, tens of thousands of
+  long mulberry fibres laid as curved threads (they give the tooth, the pale
+  and dark threads, and the direction water prefers to travel).
+* Ink is optical density, never colour: colour = paper * exp(-density * k(rgb)),
+  with k leaning blue-grey for thin ink and warm for thick (pine soot).
+* Wet: a half-resolution grid keeps water, mobile pigment and settled pigment
+  apart.  Water creeps by capillary flow (only out of cells wet enough to give
+  it), pigment rides the water and diffuses only between wet cells, settles
+  faster into the hollows of the paper, and whatever the flow carried to the
+  edge of the wet is left there as the drying line.  Fresh water arriving in a
+  damp wash lifts pigment again and pushes it out: a back-run.
+* Reserves: the bubbles are marked before any wash; nothing wet is laid on
+  them and the water is held off, so the wash dries against their edge.
+* Dry (galpil): one gesture along a spline with pressure and ink load varying
+  along it.  Each bristle carries its own ink; as the load falls, only the
+  best-loaded bristles on the highest fibres still mark the paper.
+* Light is paper.  There is no white anywhere in this file.
+&quot;&quot;&quot;
+import sys
+import math
+import numpy as np
+from numba import njit, prange
+from scipy import ndimage as ndi
+from PIL import Image, ImageDraw
+
+TITLE = &quot;Under the float, looking up&quot;
+# Hado-ri tide table for the day of the dive (time hhmm, height cm)
+TIDE = &quot;Hado-ri 2016-06-21  low 0448 021  high 1109 243  low 1702 064  high 2301 259&quot;
+SEED = int(&quot;&quot;.join(c for c in TIDE if c.isdigit())) % (2 ** 32)
+
+BASE_W, BASE_H = 2100, 3000
+
+
+# ----------------------------------------------------------------- helpers
+def smooth_noise(rng, shape, sigma):
+    n = ndi.gaussian_filter(rng.standard_normal(shape).astype(np.float32), sigma, mode=&quot;wrap&quot;)
+    return n / (n.std() + 1e-9)
+
+
+def rank01(a):
+    &quot;&quot;&quot;map to a roughly uniform 0..1 distribution (via the normal cdf of the z-score)&quot;&quot;&quot;
+    z = (a - a.mean()) / (a.std() + 1e-9)
+    return (0.5 * (1.0 + np.vectorize(math.erf, otypes=[np.float32])(z / 1.41421356))).astype(np.float32) \
+        if a.size &lt; 4096 else _erf01(z.astype(np.float32))
+
+
+@njit(parallel=True, cache=True)
+def _erf01(z):
+    out = np.empty_like(z)
+    f = z.ravel()
+    o = out.ravel()
+    for i in prange(f.size):
+        o[i] = 0.5 * (1.0 + math.erf(f[i] / 1.41421356))
+    return out
+
+
+def crom(pts, spacing):
+    &quot;&quot;&quot;Catmull-Rom through pts, resampled at even spacing. returns xy (n,2), length&quot;&quot;&quot;
+    pts = np.asarray(pts, dtype=np.float64)
+    P = np.vstack([2 * pts[0] - pts[1], pts, 2 * pts[-1] - pts[-2]])
+    out = []
+    for i in range(len(pts) - 1):
+        p0, p1, p2, p3 = P[i:i + 4]
+        n = max(6, int(np.linalg.norm(p2 - p1) / max(spacing, 0.25) * 1.5))
+        t = np.linspace(0, 1, n, endpoint=False)[:, None]
+        out.append(0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t * t
+                          + (-p0 + 3 * p1 - 3 * p2 + p3) * t ** 3))
+    out.append(pts[-1:])
+    xy = np.vstack(out)
+    d = np.r_[0, np.cumsum(np.hypot(*np.diff(xy, axis=0).T))]
+    n = max(8, int(d[-1] / spacing))
+    s = np.linspace(0, d[-1], n)
+    return np.c_[np.interp(s, d, xy[:, 0]), np.interp(s, d, xy[:, 1])], d[-1]
+
+
+def profile(spec, n, smooth=0.02):
+    &quot;&quot;&quot;spec: list of (t, value) -&gt; smooth array of n samples&quot;&quot;&quot;
+    spec = np.asarray(spec, dtype=np.float64)
+    v = np.interp(np.linspace(0, 1, n), spec[:, 0], spec[:, 1])
+    if smooth &gt; 0 and n &gt; 8:
+        v = ndi.gaussian_filter1d(v, max(1.0, smooth * n), mode=&quot;nearest&quot;)
+    return v
+
+
+# ------------------------------------------------------------------- paper
+@njit(cache=True, fastmath=True)
+def _fibres(F, TX, TY, n, lmin, lmax, wmin, wmax, alo, ahi, wander, seed):
+    np.random.seed(seed)
+    h, w = F.shape
+    th_, tw_ = TX.shape
+    step = 0.7
+    for i in range(n):
+        x = np.random.random() * (w + 200) - 100
+        y = np.random.random() * (h + 200) - 100
+        th = np.random.random() * 6.2831853
+        if np.random.random() &lt; 0.35:            # the vat&#x27;s rocking lays a share of them one way
+            th = 0.25 * np.random.standard_normal()
+        L = lmin * (lmax / lmin) ** np.random.random()
+        wd = wmin + (wmax - wmin) * np.random.random() ** 2
+        a = alo + (ahi - alo) * np.random.random()
+        curv = (np.random.random() - 0.5) * wander
+        steps = int(L / step)
+        sg = max(0.45, wd * 0.5)
+        R = int(sg * 2.5) + 1
+        norm = a * step / (sg * 2.5)
+        for k in range(steps):
+            t = k / steps
+            tap = min(1.0, 5 * t, 5 * (1 - t))
+            th += curv * step + (np.random.random() - 0.5) * wander * 6
+            c = math.cos(th)
+            s = math.sin(th)
+            x += c * step
+            y += s * step
+            ix = int(x)
+            iy = int(y)
+            if ix &lt; -R or iy &lt; -R or ix &gt;= w + R or iy &gt;= h + R:
+                continue
+            for yy in range(max(0, iy - R), min(h, iy + R + 1)):
+                for xx in range(max(0, ix - R), min(w, ix + R + 1)):
+                    d2 = (xx - x) ** 2 + (yy - y) ** 2
+                    F[yy, xx] += norm * tap * math.exp(-d2 / (2 * sg * sg))
+            sx = ix // 2
+            sy = iy // 2
+            if 0 &lt;= sx &lt; tw_ and 0 &lt;= sy &lt; th_:
+                TX[sy, sx] += c * c * wd
+                TY[sy, sx] += s * s * wd
+
+
+# ----------------------------------------------------------------- wet sim
+@njit(cache=True, fastmath=True, inline=&quot;always&quot;)
+def _mob(w, wmin, wr):
+    m = (w - wmin) / wr
+    if m &lt; 0.0:
+        return 0.0
+    if m &gt; 1.0:
+        return 1.0
+    return m
+
+
+@njit(cache=True, fastmath=True, inline=&quot;always&quot;)
+def _edge(wi, pi, wj, pj, k, wmin, wr, carry, dp):
+    &quot;&quot;&quot;flux of water and pigment from i to j across one edge&quot;&quot;&quot;
+    dw = wi - wj
+    mi = _mob(wi, wmin, wr)
+    mj = _mob(wj, wmin, wr)
+    if dw &gt; 0:
+        f = k * dw * mi
+        fp = carry * f * pi / (wi + 1e-4)
+    else:
+        f = k * dw * mj
+        fp = carry * f * pj / (wj + 1e-4)
+    g = mi if mi &lt; mj else mj
+    fp += dp * k * g * (pi - pj)
+    return f, fp
+
+
+@njit(parallel=True, cache=True, fastmath=True)
+def _flow(W, P, D, KX, KY, HOL, n, dt, wmin, wr, evap, carry, dp, fix0, fix1, gran, lift):
+    h, w = W.shape
+    W2 = np.empty_like(W)
+    P2 = np.empty_like(P)
+    for it in range(n):
+        for y in prange(h):
+            for x in range(w):
+                wi = W[y, x]
+                pi = P[y, x]
+                if wi &lt;= 0.0 and pi &lt;= 0.0:
+                    dry = True
+                    if x &gt; 0 and W[y, x - 1] &gt; wmin:
+                        dry = False
+                    if x &lt; w - 1 and W[y, x + 1] &gt; wmin:
+                        dry = False
+                    if y &gt; 0 and W[y - 1, x] &gt; wmin:
+                        dry = False
+                    if y &lt; h - 1 and W[y + 1, x] &gt; wmin:
+                        dry = False
+                    if dry:
+                        W2[y, x] = 0.0
+                        P2[y, x] = 0.0
+                        continue
+                fw = 0.0
+                fp = 0.0
+                if x &gt; 0:
+                    a, b = _edge(wi, pi, W[y, x - 1], P[y, x - 1], KX[y, x - 1], wmin, wr, carry, dp)
+                    fw += a
+                    fp += b
+                if x &lt; w - 1:
+                    a, b = _edge(wi, pi, W[y, x + 1], P[y, x + 1], KX[y, x], wmin, wr, carry, dp)
+                    fw += a
+                    fp += b
+                if y &gt; 0:
+                    a, b = _edge(wi, pi, W[y - 1, x], P[y - 1, x], KY[y - 1, x], wmin, wr, carry, dp)
+                    fw += a
+                    fp += b
+                if y &lt; h - 1:
+                    a, b = _edge(wi, pi, W[y + 1, x], P[y + 1, x], KY[y, x], wmin, wr, carry, dp)
+                    fw += a
+                    fp += b
+                wn = wi - dt * fw
+                pn = pi - dt * fp
+                if pn &lt; 0.0:
+                    pn = 0.0
+                # fresh water arriving lifts settled pigment of this sitting (back-runs)
+                inflow = wn - wi
+                if inflow &gt; 0.0 and lift &gt; 0.0:
+                    lf = lift * inflow
+                    if lf &gt; 0.5:
+                        lf = 0.5
+                    lf *= D[y, x]
+                    D[y, x] -= lf
+                    pn += lf
+                wn -= evap
+                if wn &lt; 0.0:
+                    wn = 0.0
+                # settling: slow while flooded, fast as it goes damp, more into hollows
+                m = _mob(wn, wmin, wr)
+                rate = (fix0 + fix1 * (1.0 - m)) * (1.0 + gran * (HOL[y, x] - 0.5))
+                if wn &lt;= 1e-4:
+                    rate = 1.0
+                if rate &gt; 1.0:
+                    rate = 1.0
+                if rate &lt; 0.0:
+                    rate = 0.0
+                dep = pn * rate
+                D[y, x] += dep
+                P2[y, x] = pn - dep
+                W2[y, x] = wn
+        for y in prange(h):
+            for x in range(w):
+                W[y, x] = W2[y, x]
+                P[y, x] = P2[y, x]
+
+
+# ------------------------------------------------------------------- brush
+@njit(cache=True, fastmath=True)
+def _stroke(px, py, rad, load, tone, CAP, wob, H, Dd, Pa, Wa, conc, water, wet, soft, tooth, body):
+    n = px.size
+    h, w = H.shape
+    nb, ns = CAP.shape
+    rmax = rad.max() + 3.0
+    x0 = max(0, int(px.min() - rmax))
+    x1 = min(w, int(px.max() + rmax) + 2)
+    y0 = max(0, int(py.min() - rmax))
+    y1 = min(h, int(py.max() + rmax) + 2)
+    if x1 &lt;= x0 or y1 &lt;= y0:
+        return
+    bw = x1 - x0
+    bh = y1 - y0
+    best = np.full((bh, bw), 1e18, dtype=np.float32)
+    lat = np.zeros((bh, bw), dtype=np.float32)
+    idx = np.full((bh, bw), -1, dtype=np.int32)
+    for i in range(n):
+        i0 = i - 1 if i &gt; 0 else 0
+        i1 = i + 1 if i &lt; n - 1 else n - 1
+        tx = px[i1] - px[i0]
+        ty = py[i1] - py[i0]
+        tl = math.sqrt(tx * tx + ty * ty) + 1e-9
+        tx /= tl
+        ty /= tl
+        R = rmax          # search by plain distance: the nearest point of the gesture owns the pixel
+        R2 = R * R
+        for yy in range(max(y0, int(py[i] - R)), min(y1, int(py[i] + R) + 2)):
+            for xx in range(max(x0, int(px[i] - R)), min(x1, int(px[i] + R) + 2)):
+                dx = xx - px[i]
+                dy = yy - py[i]
+                d2 = dx * dx + dy * dy
+                if d2 &lt; R2 and d2 &lt; best[yy - y0, xx - x0]:
+                    best[yy - y0, xx - x0] = d2
+                    idx[yy - y0, xx - x0] = i
+                    la = dx * ty - dy * tx
+                    if i == 0 or i == n - 1:
+                        al = dx * tx + dy * ty
+                        if (i == 0 and al &lt; 0) or (i == n - 1 and al &gt; 0):
+                            la = 1e9          # the brush is lifted: nothing beyond the end of the gesture
+                    lat[yy - y0, xx - x0] = la
+    for yy in range(bh):
+        for xx in range(bw):
+            i = idx[yy, xx]
+            if i &lt; 0:
+                continue
+            r = rad[i]
+            la = lat[yy, xx]
+            d = abs(la)
+            e = (r - d) / soft + 0.5
+            if e &lt;= 0.0:
+                continue
+            if e &gt; 1.0:
+                e = 1.0
+            L = load[i]
+            u = la / (r + 1e-6)
+            if u &lt; -1.0:
+                u = -1.0
+            if u &gt; 1.0:
+                u = 1.0
+            fb = (u * 0.5 + 0.5) * (nb - 1) + wob[i]
+            if fb &lt; 0:
+                fb = 0.0
+            if fb &gt; nb - 1.001:
+                fb = nb - 1.001
+            b0 = int(fb)
+            fr = fb - b0
+            si = int(i * ns / n)
+            cap = CAP[b0, si] * (1 - fr) + CAP[b0 + 1, si] * fr
+            Hp = H[yy + y0, xx + x0]
+            thr = 1.0 - L
+            v = 0.62 * cap + tooth * Hp + 0.18 - thr * (0.80 + tooth)
+            c = v / 0.16
+            if c &lt;= 0.0:
+                continue
+            if c &gt; 1.0:
+                c = 1.0
+            c = c * c * (3 - 2 * c)
+            amt = conc * tone[i] * c * e * (0.74 + 0.26 * cap) * (body + (1.0 - body) * L)
+            wf = (L - 0.30) / 0.45
+            if wf &lt; 0.0:
+                wf = 0.0
+            if wf &gt; 1.0:
+                wf = 1.0
+            wf *= wet
+            Dd[yy + y0, xx + x0] += amt * (1.0 - wf)
+            Pa[yy + y0, xx + x0] += amt * wf
+            Wa[yy + y0, xx + x0] += water * wf * e
+
+
+# ------------------------------------------------------------------- sheet
+class Sheet:
+    def __init__(self, bw, bh, S, seed):
+        self.S = S
+        self.W = int(round(bw * S / 2)) * 2
+        self.H = int(round(bh * S / 2)) * 2
+        self.sw, self.sh = self.W // 2, self.H // 2
+        self.S2 = S * S
+        self.rng = np.random.default_rng(seed)
+        self.seed = seed
+        self._paper()
+        z = lambda: np.zeros((self.sh, self.sw), np.float32)
+        self.Ww, self.Pp, self.Dc, self.Dfix = z(), z(), z(), z()
+        f = lambda: np.zeros((self.H, self.W), np.float32)
+        self.Dd, self.Pa, self.Wa = f(), f(), f()
+        self.seals = []
+        self.Rfull = np.ones((self.H, self.W), np.float32)      # reserves: 0 where paper is kept
+        self.Rsim = np.ones((self.sh, self.sw), np.float32)
+
+    # .................................................. the hanji
+    def _paper(self):
+        S, W, H, rng = self.S, self.W, self.H, self.rng
+        F_long = np.zeros((H, W), np.float32)
+        F_fine = np.zeros((H, W), np.float32)
+        F_dark = np.zeros((H, W), np.float32)
+        TX = np.zeros((self.sh, self.sw), np.float32)
+        TY = np.zeros((self.sh, self.sw), np.float32)
+        dump = np.zeros((2, 2), np.float32)
+        area = W * H / (1700 * 3000.0) / (S * S)
+        # long mulberry fibres: the visible threads
+        _fibres(F_long, TX, TY, int(5200 * area), 260 * S, 1500 * S, 0.7 * S + 0.35, 2.3 * S + 0.5,
+                0.35, 1.0, 0.0030 / S, self.seed % 100000 + 1)
+        # the felt of fine fibre that makes the tooth
+        _fibres(F_fine, TX, TY, int(150000 * area), 30 * S, 190 * S, 0.5, 0.75 * S + 0.3,
+                0.3, 1.0, 0.012 / S, self.seed % 100000 + 2)
+        # a few darker strands (inner bark left in the pulp)
+        _fibres(F_dark, dump, dump, int(260 * area), 60 * S, 420 * S, 0.6 * S + 0.3, 1.5 * S + 0.4,
+                0.3, 1.0, 0.004 / S, self.seed % 100000 + 3)
+        cloud = (0.45 * smooth_noise(rng, (H, W), 5 * S) + 0.55 * smooth_noise(rng, (H, W), 16 * S)
+                 + 0.65 * smooth_noise(rng, (H, W), 55 * S) + 0.5 * smooth_noise(rng, (H, W), 190 * S))
+        cloud /= cloud.std()
+        grain = smooth_noise(rng, (H, W), 0.7)
+        fl = F_long / (F_long.std() + 1e-9)
+        ff = F_fine / (F_fine.std() + 1e-9)
+        tooth = 0.6 * ff + 0.22 * np.minimum(fl, 4.0) + 0.5 * grain + 0.25 * cloud
+        self.Ht = _erf01(((tooth - tooth.mean()) / tooth.std()).astype(np.float32))
+        self.cloud = cloud.astype(np.float32)
+        # colour of the bare sheet
+        fl_s = np.minimum(ndi.gaussian_filter(F_long, 0.5), 2.2)
+        fd = np.minimum(ndi.gaussian_filter(F_dark, 0.5), 1.6)
+        lum = (1.0 + 0.011 * cloud + 0.011 * (fl_s - fl_s.mean()) + 0.004 * (ff - ff.mean()).clip(-2, 3)
+               - 0.05 * fd)
+        # raking light on the tooth
+        hs = ndi.gaussian_filter(self.Ht, 0.6)
+        lum += 0.022 * (hs - np.roll(np.roll(hs, 1, 0), 1, 1))
+        base = np.array([0.946, 0.928, 0.884], np.float32)
+        paper = base[None, None, :] * lum[..., None].astype(np.float32)
+        paper[..., 2] *= (1.0 + 0.006 * cloud - 0.02 * fd)      # thicker = warmer
+        paper[..., 0] *= (1.0 + 0.004 * cloud)
+        self.paper = np.clip(paper, 0, 1).astype(np.float32)
+        self.Flong = fl_s.astype(np.float32)
+        # what the water sees (half resolution)
+        ds = lambda a: a.reshape(self.sh, 2, self.sw, 2).mean(axis=(1, 3))
+        TXs = ndi.gaussian_filter(TX, 2.5 * max(S, 0.5))
+        TYs = ndi.gaussian_filter(TY, 2.5 * max(S, 0.5))
+        ani = (TXs - TYs) / (TXs + TYs + 1e-6)
+        perm = np.exp(0.38 * ds(cloud) + 0.30 * smooth_noise(rng, (self.sh, self.sw), 1.2)
+                      + 0.12 * ds(np.minimum(fl, 3.0) - fl.mean()))
+        self.KX = np.clip(0.62 * perm * (1 + 0.55 * ani), 0.02, 1.15).astype(np.float32)
+        self.KY = np.clip(0.62 * perm * (1 - 0.55 * ani), 0.02, 1.15).astype(np.float32)
+        self.HOL = (-ds(0.55 * ff + 0.45 * grain + 0.12 * np.minimum(fl, 3.0))).astype(np.float32)
+        self.HOL = ndi.gaussian_filter(self.HOL, 0.8)
+        self.HOL = np.clip(0.5 + (self.HOL - self.HOL.mean()) / (4.0 * self.HOL.std()), 0, 1).astype(np.float32)
+
+    # .................................................. laying ink
+    def stroke(self, pts, rad, load, conc, water=0.0, wet=0.0, nb=48, soft=1.2, tooth=0.6,
+               body=0.7, wobble=1.2, seed=0, streak=1.0, tone=None):
+        S = self.S
+        pts = np.asarray(pts, np.float64) * S
+        rmax = max(r for _, r in rad) * S
+        spacing = max(0.5, min(rmax / 14.0, 3.0))
+        xy, length = crom(pts, spacing)
+        n = len(xy)
+        r = np.maximum(profile(rad, n) * S, 0.0)
+        L = np.clip(profile(load, n), 0, 1)
+        tn = np.ones(n) if tone is None else profile(tone, n)
+        rg = np.random.default_rng(self.seed + 7919 * (seed + 1))
+        ns = 256
+        pad = 8                                      # so the outermost hairs are no different from the rest
+        cap = ndi.gaussian_filter(rg.standard_normal((nb + 1 + 2 * pad, ns)).astype(np.float32),
+                                  (0.6, 30.0 / streak), mode=&quot;wrap&quot;)
+        clump = ndi.gaussian_filter(rg.standard_normal((nb + 1 + 2 * pad, ns)).astype(np.float32), (2.5, 60.0),
+                                    mode=&quot;wrap&quot;)
+        cap = (cap / cap.std() + 0.6 * clump / clump.std())[pad:-pad]
+        CAP = _erf01(((cap - cap.mean()) / cap.std()).astype(np.float32))
+        wob = ndi.gaussian_filter1d(rg.standard_normal(n), max(2.0, 40.0 * S / spacing))
+        wob = wobble * wob / (np.abs(wob).max() + 1e-9)
+        _stroke(xy[:, 0].astype(np.float32), xy[:, 1].astype(np.float32), r.astype(np.float32),
+                L.astype(np.float32), tn.astype(np.float32), CAP, wob.astype(np.float32), self.Ht, self.Dd, self.Pa, self.Wa,
+                conc, water, wet, max(0.8, soft * S), tooth, body)
+
+    def reserve(self, x, y, rx, ry=None, ang=0.0, seed=0, edge=1.5):
+        &quot;&quot;&quot;paper to be kept (a bubble, foam): planned before any wash. Nothing wet is laid there and
+        the water is held off it, so the wash runs round and dries against its edge.&quot;&quot;&quot;
+        S = self.S
+        ry = rx if ry is None else ry
+        R = int(max(rx, ry) * S * 1.4) + 6
+        x0, x1 = max(0, int(x * S) - R), min(self.W, int(x * S) + R)
+        y0, y1 = max(0, int(y * S) - R), min(self.H, int(y * S) + R)
+        x0 -= x0 % 2
+        y0 -= y0 % 2
+        x1 -= x1 % 2
+        y1 -= y1 % 2
+        yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
+        dx, dy = xx - x * S, yy - y * S
+        ca, sa = math.cos(ang), math.sin(ang)
+        u, v = (dx * ca + dy * sa) / (rx * S), (-dx * sa + dy * ca) / (ry * S)
+        th = np.arctan2(v, u)
+        rg = np.random.default_rng(self.seed + 7717 * (seed + 1))
+        k = np.zeros_like(th)
+        for m in range(2, 6):
+            k += 0.05 * rg.standard_normal() / (m - 1) * np.cos(m * th + rg.uniform(0, 6.28))
+        d = (np.hypot(u, v) - (1 + k)) * min(rx, ry) * S          # signed distance in px, roughly
+        keep = np.clip(d / max(edge * S, 0.8) + 0.5, 0, 1).astype(np.float32)
+        self.Rfull[y0:y1, x0:x1] *= keep
+        ks = keep.reshape((y1 - y0) // 2, 2, (x1 - x0) // 2, 2).min(axis=(1, 3))
+        sy, sx = slice(y0 // 2, y1 // 2), slice(x0 // 2, x1 // 2)
+        self.Rsim[sy, sx] *= ks
+        self.KX[sy, sx] *= np.minimum(ks, np.roll(ks, -1, axis=1))
+        self.KY[sy, sx] *= np.minimum(ks, np.roll(ks, -1, axis=0))
+
+    def drop(self, x, y, r, pig, water, ragged=0.25, seed=0, squash=1.0, ang=0.0):
+        &quot;&quot;&quot;ink (or clean water) touched into the sheet: goes straight to the wet layer&quot;&quot;&quot;
+        S = self.S
+        cx, cy, rr = x * S / 2, y * S / 2, r * S / 2
+        R = int(rr * 1.6) + 3
+        x0, x1 = max(0, int(cx) - R), min(self.sw, int(cx) + R)
+        y0, y1 = max(0, int(cy) - R), min(self.sh, int(cy) + R)
+        if x1 &lt;= x0 or y1 &lt;= y0:
+            return
+        yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
+        dx, dy = xx - cx, yy - cy
+        ca, sa = math.cos(ang), math.sin(ang)
+        u = dx * ca + dy * sa
+        v = (-dx * sa + dy * ca) / squash
+        th = np.arctan2(v, u)
+        rg = np.random.default_rng(self.seed + 104729 * (seed + 1))
+        k = np.zeros_like(th)
+        for m in range(2, 9):
+            k += rg.standard_normal() / m * np.cos(m * th + rg.uniform(0, 6.28))
+        d = np.hypot(u, v) / (rr * (1 + ragged * k))
+        a = np.clip((1.0 - d) / 0.18, 0, 1)
+        a = a * a * (3 - 2 * a)
+        a = a * self.Rsim[y0:y1, x0:x1]
+        self.Pp[y0:y1, x0:x1] += pig * a
+        self.Ww[y0:y1, x0:x1] = np.minimum(self.Ww[y0:y1, x0:x1] + water * a, 1.6)
+
+    def patch(self, poly, pig, water, seed=0, rough=0.3, fade=None):
+        &quot;&quot;&quot;ink laid with the side of the brush as one irregular mass, straight into the wet layer.
+        fade=(y0, y1, floor): the mass thins out downward between y0 and y1&quot;&quot;&quot;
+        k = self.S / 2
+        im = Image.new(&quot;L&quot;, (self.sw, self.sh), 0)
+        ImageDraw.Draw(im).polygon([(x * k, y * k) for x, y in poly], fill=255)
+        rg = np.random.default_rng(self.seed + 15485863 * (seed + 1))
+        m = ndi.gaussian_filter(np.asarray(im, np.float32) / 255.0, 5.0 * self.S)
+        nz = 0.6 * smooth_noise(rg, m.shape, 3.0 * self.S + 0.5) + 0.8 * smooth_noise(rg, m.shape, 14.0 * self.S)
+        a = np.clip((m + rough * nz * np.sqrt(np.clip(m * (1 - m), 0, 1)) - 0.5) / 0.22 + 0.5, 0, 1)
+        a = a * a * (3 - 2 * a)
+        body = np.clip(1.0 + 0.16 * smooth_noise(rg, m.shape, 30.0 * self.S), 0.5, 1.5)
+        if fade is not None:
+            yy = np.arange(self.sh, dtype=np.float32)[:, None] / k
+            t = np.clip((yy - fade[0]) / (fade[1] - fade[0]) + 0.12 * smooth_noise(rg, m.shape, 40.0 * self.S), 0, 1)
+            f_ = 1.0 - (1.0 - fade[2]) * t * t * (3 - 2 * t)
+            body = body * f_
+        a = a * self.Rsim
+        self.Pp += (pig * a * body).astype(np.float32)
+        self.Ww = np.minimum(self.Ww + water * a, 1.6).astype(np.float32)
+
+    def grid(self):
+        &quot;&quot;&quot;coordinates of the wet layer&#x27;s cells, in the sheet&#x27;s own units (scale 1 pixels)&quot;&quot;&quot;
+        k = 2.0 / self.S
+        yy, xx = np.mgrid[0:self.sh, 0:self.sw].astype(np.float32)
+        return (xx + 0.5) * k, (yy + 0.5) * k
+
+    def lay(self, pig, water):
+        &quot;&quot;&quot;a broad wash floated on with the big brush: pigment and water given over the whole sheet&quot;&quot;&quot;
+        self.Pp += (pig * self.Rsim).astype(np.float32)
+        self.Ww = np.minimum(self.Ww + water * self.Rsim, 1.6).astype(np.float32)
+
+    def flush(self):
+        ds = lambda a: a.reshape(self.sh, 2, self.sw, 2).mean(axis=(1, 3))
+        self.Pp += ds(self.Pa * self.Rfull)
+        self.Ww = np.minimum(self.Ww + ds(self.Wa * self.Rfull), 1.6).astype(np.float32)
+        self.Pa[:] = 0
+        self.Wa[:] = 0
+
+    def flow(self, t, evap=0.0006, carry=0.8, dp=0.35, fix0=0.0004, fix1=0.02, gran=0.4, lift=0.6,
+             wmin=0.22, wr=0.25):
+        &quot;&quot;&quot;let the sheet sit for t (time is in steps at scale 1; scaled so pictures agree at any scale)&quot;&quot;&quot;
+        self.flush()
+        n = max(1, int(round(t * self.S2)))
+        s2 = self.S2
+        _flow(self.Ww, self.Pp, self.Dc, self.KX, self.KY, self.HOL, n, 0.2, wmin, wr,
+              evap / s2, carry, dp, min(1.0, fix0 / s2), min(1.0, fix1 / s2), gran, lift)
+
+    def dry(self, **kw):
+        &quot;&quot;&quot;wait until the sheet is dry; ink of this sitting can no longer be lifted&quot;&quot;&quot;
+        self.flush()
+        for _ in range(60):
+            if float(self.Ww.max()) &lt;= 1e-4:
+                break
+            self.flow(400, **kw)
+        self.Dfix += self.Dc + self.Pp
+        self.Dc[:] = 0
+        self.Pp[:] = 0
+        self.Ww[:] = 0
+
+    # .................................................. the seal
+    def seal(self, cx, cy, size, rot=0.0, seed=0, firm=0.0):
+        self.seals.append((cx, cy, size, rot, seed, firm))
+
+    def _press_seal(self, col, cx, cy, size, rot, seed, firm=0.0):
+        &quot;&quot;&quot;vermilion square seal, white-on-red: 숨 built from its three jamo&quot;&quot;&quot;
+        S = self.S
+        s = size * S
+        R = int(s * 0.8) + 4
+        x0, y0 = int(cx * S) - R, int(cy * S) - R
+        x1, y1 = x0 + 2 * R, y0 + 2 * R
+        if x0 &lt; 0 or y0 &lt; 0 or x1 &gt; self.W or y1 &gt; self.H:
+            raise ValueError(&quot;seal off the sheet&quot;)
+        rg = np.random.default_rng(self.seed + 31337 * (seed + 1))
+        yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
+        ca, sa = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+        dx, dy = (xx - cx * S) / s, (yy - cy * S) / s
+        u = dx * ca + dy * sa
+        v = -dx * sa + dy * ca
+        # the carved edge is never perfectly straight
+        wig = 0.007 * smooth_noise(rg, u.shape, 3.0 * S + 0.5) + 0.004 * smooth_noise(rg, u.shape, 1.0 * S + 0.3)
+        rc = 0.045
+        qx, qy = np.abs(u) - (0.5 - rc), np.abs(v) - (0.5 - rc)
+        dbox = np.hypot(np.maximum(qx, 0), np.maximum(qy, 0)) + np.minimum(np.maximum(qx, qy), 0) - rc + wig
+        px, py = u + 0.5, v + 0.5
+        sw_ = 0.068
+        segs = [
+            # ㅅ : two strokes meeting at the top
+            (0.50, 0.110, 0.240, 0.335), (0.50, 0.110, 0.760, 0.335),
+            # ㅜ : a bar, and a short stem down from its middle
+            (0.175, 0.465, 0.825, 0.465), (0.50, 0.465, 0.50, 0.605),
+            # ㅁ : a closed square
+            (0.275, 0.715, 0.725, 0.715), (0.725, 0.715, 0.725, 0.885),
+            (0.725, 0.885, 0.275, 0.885), (0.275, 0.885, 0.275, 0.715),
+        ]
+        dg = np.full(u.shape, 9.0, np.float32)
+        for ax, ay, bx, by in segs:
+            ex, ey = bx - ax, by - ay
+            t = np.clip(((px - ax) * ex + (py - ay) * ey) / (ex * ex + ey * ey), 0, 1)
+            dg = np.minimum(dg, np.hypot(px - ax - t * ex, py - ay - t * ey))
+        dg = dg - sw_ / 2 + wig * 0.8
+        px_ = 1.0 / s                                    # one pixel in seal units
+        a_box = np.clip(-dbox / (1.6 * px_) + 0.5, 0, 1)
+        a_g = np.clip(dg / (1.3 * px_) + 0.5, 0, 1)
+        cover = a_box * a_g
+        Hl = self.Ht[y0:y1, x0:x1]
+        press = 0.5 + 0.5 * np.tanh(0.9 * smooth_noise(rg, u.shape, 14 * S) + 0.5
+                                    + 1.2 * (u * 0.5 - v * 0.35))       # pressed a little harder on one side
+        squeeze = np.exp(-np.abs(dbox) / 0.03) * 0.25              # paste squeezed to the rim
+        take = np.clip((0.75 * Hl + 0.75 * press + squeeze - 0.34 + firm) / 0.30, 0, 1)
+        take = take * take * (3 - 2 * take)
+        c = ndi.gaussian_filter(cover * (0.10 + 0.90 * take), 0.45 * S + 0.2)
+        thick = 0.86 + 0.14 * take
+        verm = np.array([0.800, 0.185, 0.115], np.float32)
+        region = col[y0:y1, x0:x1]
+        plum = region.mean(axis=2, keepdims=True) / 0.9
+        ink = verm[None, None, :] * (0.55 + 0.45 * plum) * thick[..., None]
+        cc = (0.95 * c)[..., None]
+        col[y0:y1, x0:x1] = region * (1 - cc) + ink * cc
+
+    # .................................................. to light
+    def render(self):
+        up = np.asarray(Image.fromarray(self.Dfix + self.Dc + self.Pp, mode=&quot;F&quot;).resize(
+            (self.W, self.H), Image.BICUBIC), dtype=np.float32).clip(0, None)
+        # settled pigment granulates into the hollows; the fibres stand pale in a wash
+        g = 1.0 + 0.13 * (0.5 - ndi.gaussian_filter(self.Ht, 0.7)) * 2.0 - 0.02 * np.minimum(self.Flong, 2.0) + 0.01
+        dens = up * np.clip(g, 0.45, 1.6) + self.Dd
+        self.dens = dens
+        m = (1.0 - np.exp(-dens * 0.9))[..., None]
+        k_thin = np.array([1.13, 1.00, 0.83], np.float32)       # pine soot, pale: blue-grey
+        k_thick = np.array([0.97, 1.00, 1.07], np.float32)      # thick: warm black
+        k = k_thin * (1 - m) + k_thick * m
+        T = np.exp(-dens[..., None] * k)
+        floor = np.array([0.060, 0.052, 0.048], np.float32)
+        col = self.paper * T + floor * (1 - T)
+        for sl in self.seals:
+            self._press_seal(col, *sl)
+        return np.clip(col, 0, 1)
+
+    def save(self, path):
+        col = self.render()
+        img = (col ** (1 / 1.0) * 255.0 + self.rng.uniform(-0.5, 0.5, col.shape)).round().clip(0, 255).astype(np.uint8)
+        Image.fromarray(img, &quot;RGB&quot;).save(path, dpi=(300, 300))
+        return path
+
+
+# ----------------------------------------------------------- this picture
+CX, CY = 1330.0, 960.0                        # the middle of the bright window overhead
+UX, UY = -0.62, 0.785                         # the way the water deepens: down and to the left
+
+
+def ss(v, a, b):
+    t = np.clip((v - a) / (b - a), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
+def window_r(th, ph, amp=1.0):
+    &quot;&quot;&quot;the edge of the window is never round: the swell lobes it&quot;&quot;&quot;
+    return 520.0 * (1.0 + amp * (0.085 * np.sin(3 * th + ph) + 0.055 * np.sin(5 * th + 2.3 * ph)
+                                 + 0.03 * np.sin(8 * th + 0.7 * ph)))
+
+
+def edge_pt(a_deg, ph, out=0.0):
+    t = math.radians(a_deg)
+    r = float(window_r(np.float64(t), ph)) + out
+    return CX + r * math.cos(t), CY + r * math.sin(t)
+
+
+def paint(S, out):
+    sh = Sheet(BASE_W, BASE_H, S, SEED)
+    rng = np.random.default_rng(SEED + 1)
+    full = [(0, 1), (1, 1)]
+    ph = rng.uniform(0, 6.28)
+
+    # ---- the paper to keep is chosen first: my own breath going up, larger the nearer it is
+    bubbles = [(1228, 2775, 58), (1150, 2588, 44), (1242, 2422, 50), (1166, 2252, 32), (1216, 2108, 24),
+               (1160, 1988, 16), (1196, 1884, 11)]
+    for i, (x, y, r) in enumerate(bubbles):
+        sh.reserve(x, y, r, r * 0.86, ang=rng.uniform(-0.25, 0.25), seed=i)
+
+    # ---- the one wash. Water first, then ink floated into it: nothing has an edge.
+    X, Y = sh.grid()
+    dx, dy = X - CX, Y - CY
+    dist = np.hypot(dx, dy)
+    th = np.arctan2(dy, dx)
+    cosu = (dx * UX + dy * UY) / (dist + 1e-6)
+    t1 = dist - window_r(th, ph)                       # how far outside the window
+    t2 = dist - window_r(th, ph + 1.1, 1.1)            # the same, as the next swell would draw it
+    t3 = dist - window_r(th, ph + 2.6, 1.3)
+    env = ss(cosu, 0.34, 0.74)                        # the wash is on the deep side only
+    envw = ss(cosu, 0.16, 0.56)
+    deep = 0.30 + 0.70 * ss(cosu, 0.78, 0.99)          # and deepest toward the corner
+    hand = np.clip(1.0 + 0.13 * smooth_noise(rng, X.shape, 45.0 * S) + 0.08 * smooth_noise(rng, X.shape, 12.0 * S),
+                   0.6, 1.4)
+    ring = 0.065 * ss(t1, -15.0, 45.0) * (1.0 - ss(t1, 70.0, 250.0))       # a breath of ink all the way round
+    water = 0.50 * ss(t1, -34.0, -6.0) * np.maximum(envw, 0.55 * (1.0 - ss(t1, 120.0, 330.0)))
+    pig = env * ss(t1, -10.0, 45.0) * (0.06 + 0.13 * ss(t1, 0.0, 700.0)) + ring * (1.0 - env)
+    sh.lay(pig * hand, water)
+    sh.flow(1100, evap=0.00030, dp=0.8)
+
+    # ---- middle ink, floated into the damp further out; where it meets the damp it runs back
+    #      and dries as a line, the way the swell rings the window
+    sh.lay(env * deep * hand * 0.32 * ss(t2, 500.0, 548.0) * (1.0 + 0.7 * ss(t2, 600.0, 1500.0)),
+           0.60 * env * ss(t2, 500.0, 548.0))
+    sh.flow(650, evap=0.0002, dp=0.8)
+    sh.lay(env * deep * hand * 0.80 * ss(t3, 1060.0, 1110.0) * (1.0 + 0.6 * ss(t3, 1180.0, 1900.0)),
+           0.60 * env * ss(t3, 1060.0, 1110.0))
+    # clean water touched in near the window
+    for i, (a, o, rr) in enumerate([(118, 230, 62), (176, 300, 50)]):
+        x, y = edge_pt(a, ph, o)
+        sh.drop(x, y, rr, 0.0, 0.95, ragged=0.3, seed=20 + i)
+    sh.flow(500, evap=0.0002, dp=0.8)
+
+    # ---- the wall: dark ink dropped into the wet corner and left to crawl out into the wash
+    for i, (x, y, r, sq) in enumerate([(30, 2130, 190, 1.3), (130, 2440, 230, 1.0), (60, 2800, 270, 1.0),
+                                       (340, 2850, 200, 0.8), (585, 2960, 150, 0.6), (270, 2620, 130, 0.9),
+                                       (40, 1900, 110, 1.4)]):
+        sh.drop(x, y, r, 2.7, 0.6, ragged=0.3, seed=40 + i, squash=sq, ang=rng.uniform(-0.4, 0.4))
+    sh.flow(2000, evap=0.0003, dp=1.0, carry=0.4)
+    sh.dry()
+
+    # ---- third ink, dry. The chop on the surface: three broken arcs, no more.
+    chop = dict(conc=1.5, nb=12, soft=1.0, tooth=0.7, body=0.9, wobble=1.0, streak=0.5)
+    for i, (a0, a1, o, w) in enumerate([(98, 128, 95, 7.0), (166, 196, 125, 5.5), (62, 86, 70, 5.0)]):
+        pts = [edge_pt(a, ph + 0.4 * i, o + 10 * math.sin(i + a / 9.0)) for a in np.linspace(a0, a1, 7)]
+        sh.stroke(pts, [(0, 0.4), (0.25, w), (0.7, w * 0.8), (1, 0.4)],
+                  [(0, 0.50), (0.4, 0.40), (1, 0.24)], seed=80 + i, **chop)
+
+    # the under-side of each bubble: one faint touch of the small brush
+    for i, (x, y, r) in enumerate(bubbles):
+        pts = [(x + (r + 2.5) * math.cos(math.radians(a)), y + 0.86 * (r + 2.5) * math.sin(math.radians(a)))
+               for a in (158, 120, 85, 50, 22)]
+        sh.stroke(pts, [(0, 0.4), (0.5, 1.3 + r * 0.045), (1, 0.4)], [(0, 0.8), (1, 0.6)], conc=0.85, nb=5,
+                  soft=1.6, tooth=0.4, body=0.9, wobble=0.2, seed=70 + i)
+
+    # the rope: one line from the float down toward me. Thin and dry at the float, heavier and
+    # blacker as it comes, the brush skipping once on the way.
+    sx_, sy_ = edge_pt(141, ph, -6)
+    sh.stroke([(sx_ + 6, sy_ + 72), (sx_ - 12, sy_ + 430), (sx_ + 14, sy_ + 900), (sx_ - 10, sy_ + 1330),
+               (sx_ + 30, sy_ + 1680)],
+              [(0, 1.3), (0.25, 3.5), (0.55, 8.0), (0.8, 13.0), (1, 19.0)],
+              [(0, 0.44), (0.25, 0.5), (0.45, 0.8), (0.58, 0.9), (0.68, 0.36), (0.76, 0.34), (0.86, 0.9), (1, 0.6)],
+              tone=[(0, 0.45), (0.35, 0.7), (0.7, 1.0), (1, 1.0)],
+              conc=3.3, water=0.4, wet=0.45, nb=16, soft=1.1, tooth=0.5, body=0.8, wobble=0.8, streak=0.5, seed=60)
+    sh.flow(400, evap=0.0012, carry=0.6, dp=0.2)
+    sh.dry()
+
+    # ---- the seal, last, where the float is: at the edge of the light
+    sh.seal(sx_, sy_, 132, rot=-2.0, seed=1, firm=0.26)
+    sh.save(out)
+    d = sh.dens
+    print(&quot;bare or nearly bare: %.0f%%&quot; % (100.0 * float((d &lt; 0.10).mean())))
+    return sh
+
+
+if __name__ == &quot;__main__&quot;:
+    S = float(sys.argv[1]) if len(sys.argv) &gt; 1 else 1.0
+    out = sys.argv[2] if len(sys.argv) &gt; 2 else __file__.replace(&quot;.py&quot;, &quot;.png&quot;)
+    paint(S, out)
+    print(TITLE, &quot;-&gt;&quot;, out)
+</pre>
+</main>
+<footer class="foot"><p>Antara. Winter programme, 12 November 2026 to 28 February 2027.</p></footer>
+</body>
+</html>

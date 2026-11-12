@@ -14,7 +14,7 @@ const Z_START = 11, PZ = 3.2, PW = 4.4, PH = 3.7, PT = 0.36, GAP = 1.5;
 const NAVE_WALL = '#E6E3DB', NAVE_FLOOR = '#8D8A83';
 // Evening light: ambient is low, each work has its own warm spot. Levels are in sRGB space.
 const AMB = 0.34, AMB_D = 1.0;          // wall brightness away from the works (light rooms, dark rooms)
-const TXT = '#EFE8DA', TXT2 = '#B9B2A6'; // lettering on the dim walls
+const TXT = '#F8F3E7', TXT2 = '#D6CFC1'; // lettering on the dim walls
 const WARM = '#FFC98A';
 const ZMAX_DEG = 7;                       // narrowest field of view when zoomed
 const UP = new THREE.Vector3(0, 1, 0);
@@ -25,7 +25,7 @@ let renderer;
 try { renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' }); }
 catch (err) {
   const b = $('enter'); b.textContent = 'This browser cannot show the rooms in 3D';
-  document.querySelector('#gate .fine').textContent = 'Every work, text and recording is on the plain page below.';
+  $('gate-note').textContent = 'Every work, its text, recording and code is on the plain page.'; $('gate-note').insertAdjacentHTML('beforeend', ' <a href="works/">Open it</a>');
   throw err;
 }
 renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
@@ -67,6 +67,43 @@ function speckle(g, w, h, n, amt) {   // plaster / concrete mottling
   }
 }
 
+// ---------------------------------------------------------------- lettering
+// Lettering is never painted into the wall's own texture (a wall is tens of metres at ~40 px/m, which smears it).
+// Each block gets its own transparent plane just off the wall, with a canvas sized for ~300 to 500 px per metre.
+const fontOf = (ln, px) => `${ln.style || ''} ${px}px ${ln.font || 'Marcellus'}`;
+const scratch = document.createElement('canvas').getContext('2d');
+function layoutText(t) {   // block size in metres, and where its left edge sits along the wall
+  const REF = 200, lines = []; let bw = 0, th = 0;
+  for (const ln of t.lines) {
+    const px = ln.size * REF; scratch.font = fontOf(ln, px); scratch.letterSpacing = ln.track ? `${ln.track * px}px` : '0px';
+    const w = (scratch.measureText(ln.text).width - (ln.track ? ln.track * px : 0)) / REF, h = ln.size * (ln.lead || 1.35);
+    lines.push({ ln, w, h }); bw = Math.max(bw, w); th += h;
+  }
+  scratch.letterSpacing = '0px';
+  const al = t.align || 'left';
+  return { lines, bw, th, al, x0: al === 'center' ? t.a - bw / 2 : al === 'right' ? t.a - bw : t.a };
+}
+function letterPlane(wall, t) {
+  const L = layoutText(t), pad = 0.14, Wm = L.bw + 2 * pad, Hm = L.th + 2 * pad;
+  const ppm = Math.min(t.ppm || 320, 2048 / Wm, 2048 / Hm);
+  const c = document.createElement('canvas'); c.width = Math.ceil(Wm * ppm); c.height = Math.ceil(Hm * ppm);
+  const g = c.getContext('2d'); g.textBaseline = 'top';
+  let y = pad * ppm;
+  for (const { ln, w, h } of L.lines) {
+    const px = ln.size * ppm; g.font = fontOf(ln, px); g.letterSpacing = ln.track ? `${ln.track * px}px` : '0px';
+    g.fillStyle = ln.color || TXT; g.shadowColor = 'rgba(0,0,0,.5)'; g.shadowBlur = px * 0.06; g.shadowOffsetY = px * 0.02;
+    g.fillText(ln.text, (pad + (L.al === 'center' ? (L.bw - w) / 2 : L.al === 'right' ? L.bw - w : 0)) * ppm, y);
+    y += h * ppm;
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = MAXA; tex.premultiplyAlpha = true;   // premultiplied, so mip levels do not grow dark fringes
+  tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter; tex.generateMipmaps = true;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(Wm, Hm), new THREE.MeshBasicMaterial({ map: tex, transparent: true, premultipliedAlpha: true, depthWrite: false }));
+  m.position.copy(wall.at(L.x0 + L.bw / 2, t.y - L.th / 2, 0.006)); m.rotation.y = Math.atan2(wall.nrm.x, wall.nrm.z);
+  m.renderOrder = 2; m.userData.px = [c.width, c.height, +ppm.toFixed(0)];
+  return m;
+}
+
 // ---------------------------------------------------------------- walls
 // A wall is a vertical plane seen from the side its normal points to.
 // `a` runs along it left to right as seen from that side, `y` is height.
@@ -103,26 +140,12 @@ function makeWall({ c, n, len, h, color, dark = false, amb = dark ? AMB_D : AMB,
       g.fillStyle = base; g.fillRect(cx - p.w * ppm / 2, cy - p.h * ppm / 2, p.w * ppm, p.h * ppm); g.restore();
     }
     g.fillStyle = 'rgba(0,0,0,.6)'; g.fillRect(0, H - 0.03 * ppm, W, 0.03 * ppm);   // shadow gap at the floor
-    for (const t of texts) {   // lettering is pale, with its own gentle wash of light
-      g.textBaseline = 'top'; g.textAlign = t.align || 'left';
-      let mw = 0, th = 0;
-      for (const ln of t.lines) {
-        const px = ln.size * ppm; g.font = `${ln.style || ''} ${px}px ${ln.font || 'Marcellus'}`;
-        if (ln.track) g.letterSpacing = `${ln.track * px}px`;
-        mw = Math.max(mw, g.measureText(ln.text).width); th += px * (ln.lead || 1.35);
-        if (ln.track) g.letterSpacing = '0px';
-      }
-      const x0 = t.align === 'center' ? t.a * ppm - mw / 2 : t.align === 'right' ? t.a * ppm - mw : t.a * ppm;
-      let y = H - t.y * ppm;
-      glow(g, x0 + mw / 2, y + th * 0.42, mw / 2 + 1.1 * ppm, th / 2 + 0.9 * ppm, t.wash ?? 0.2, tint, [[0, 1], [0.4, 0.62], [0.75, 0.18], [1, 0]]);
-      for (const ln of t.lines) {
-        const px = ln.size * ppm;
-        g.font = `${ln.style || ''} ${px}px ${ln.font || 'Marcellus'}`; g.fillStyle = ln.color || TXT;
-        if (ln.track) g.letterSpacing = `${ln.track * px}px`;
-        g.fillText(ln.text, t.a * ppm, y);
-        if (ln.track) g.letterSpacing = '0px';
-        y += px * (ln.lead || 1.35);
-      }
+    for (const t of texts) {   // lettering is pale, so the wall behind it is shaded a little darker (never lightened) for contrast
+      const L = layoutText(t), cx = (L.x0 + L.bw / 2) * ppm, cy = H - (t.y - L.th / 2) * ppm, rx = (L.bw / 2 + 0.9) * ppm, ry = (L.th / 2 + 0.7) * ppm, k = t.shade ?? 0.42;
+      g.save(); g.translate(cx, cy); g.scale(rx, ry);
+      const gr = g.createRadialGradient(0, 0, 0, 0, 0, 1);
+      for (const [q, m] of [[0, 1], [0.55, 0.8], [0.8, 0.35], [1, 0]]) gr.addColorStop(q, `rgba(0,0,0,${k * m})`);
+      g.fillStyle = gr; g.fillRect(-1, -1, 2, 2); g.restore();
     }
   });
   // geometry: full-height strips between openings, plus a lintel over each
@@ -142,7 +165,9 @@ function makeWall({ c, n, len, h, color, dark = false, amb = dark ? AMB_D : AMB,
   geo.setIndex(idx);
   const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex }));
   into.add(mesh); if (solid) solids.push(mesh);
-  return { at, aOf, nrm, r, len, h, mesh };
+  const wall = { at, aOf, nrm, r, len, h, mesh };
+  for (const t of texts) into.add(letterPlane(wall, t));
+  return wall;
 }
 
 function flat(x0, x1, z0, z1, y, tex, up, into, opacity = 1) {   // floor (up) or ceiling
@@ -216,23 +241,24 @@ function hang(wall, w, e, a, room, maxDist, dark) {
   put(new THREE.Mesh(new THREE.BoxGeometry(s.fw, s.fh, 0.05), new THREE.MeshBasicMaterial({ color: e.frame })), 0.025);
   if (s.m) put(new THREE.Mesh(new THREE.PlaneGeometry(s.ww + 2 * s.m, s.wh + 2 * s.m), new THREE.MeshBasicMaterial({ color: dark ? '#CFCABF' : '#DDD9CF' })), 0.0515);
   const art = put(new THREE.Mesh(new THREE.PlaneGeometry(s.ww, s.wh), new THREE.MeshBasicMaterial({ color: '#777' })), 0.054);
-  // wall label
-  const lw = 0.34, lh = 0.2;
-  const label = canvasTex(510, 300, (g, W, H) => {
-    g.fillStyle = dark ? '#8E8A82' : '#F6F4EE'; g.fillRect(0, 0, W, H);
-    g.fillStyle = '#141412'; g.textBaseline = 'top';
-    g.font = '600 30px "Albert Sans"'; g.fillText(e.artist, 30, 28);
-    g.font = 'italic 25px "Albert Sans"';
-    let line = '', yy = 76;
+  // wall label: 0.56 x 0.33 m, drawn at about 1800 px per metre so it stays sharp when you step up to it
+  const lw = 0.56, lh = 0.33, K = 2.2;
+  const label = canvasTex(1010, 594, (g, W, H) => {
+    g.fillStyle = dark ? '#BDB8AE' : '#F8F6F0'; g.fillRect(0, 0, W, H);
+    g.fillStyle = '#121210'; g.textBaseline = 'top';
+    const X = 30 * K, MW = W - 60 * K;
+    g.font = `600 ${30 * K}px "Albert Sans"`; g.fillText(e.artist, X, 24 * K, MW);
+    g.font = `italic ${25 * K}px "Albert Sans"`;
+    let line = '', yy = 68 * K;
     for (const word of w.title.split(' ')) {
-      if (g.measureText(line + word).width > W - 60 && line) { g.fillText(line.trim(), 30, yy); yy += 32; line = ''; }
+      if (g.measureText(line + word).width > MW && line) { g.fillText(line.trim(), X, yy); yy += 31 * K; line = ''; }
       line += word + ' ';
     }
-    g.fillText(line.trim() + ', ' + w.year, 30, yy); yy += 46;
-    g.font = '21px "Albert Sans"'; g.fillStyle = '#3A3936';
-    g.fillText(w.medium, 30, yy, W - 60); g.fillText(`${w.cm[0]} × ${w.cm[1]} cm`, 30, yy + 29);
+    g.fillText(line.trim() + ', ' + w.year, X, yy); yy += 44 * K;
+    g.font = `${21 * K}px "Albert Sans"`; g.fillStyle = '#2E2D2A';
+    g.fillText(w.medium, X, yy, MW); g.fillText(`${w.cm[0]} × ${w.cm[1]} cm`, X, yy + 28 * K);
   });
-  put(new THREE.Mesh(new THREE.PlaneGeometry(lw, lh), new THREE.MeshBasicMaterial({ map: label, color: '#CFCAC0' })), 0.006, s.fw / 2 + 0.3 + lw / 2, 1.22);
+  put(new THREE.Mesh(new THREE.PlaneGeometry(lw, lh), new THREE.MeshBasicMaterial({ map: label, color: '#DAD5CB' })), 0.006, s.fw / 2 + 0.3 + lw / 2, 1.22);
   const rec = { w, e, room, art, s, y, pos: wall.at(a, y, 0), n: wall.nrm.clone(), maxDist, level: -1, want: 0, busy: false };
   recOf.set(art, rec); solids.push(art); works.push(rec);
   return rec;
@@ -321,7 +347,7 @@ function buildNave() {
     // left wall runs away from the entrance, so its lettering sits before each door and reads toward it
     const probe = makeProbe([side * NW / 2, (Z_START + Z_END) / 2], [-side, 0], NL);
     makeWall({ c: [side * NW / 2, (Z_START + Z_END) / 2], n: [-side, 0], len: NL, h: NH, color: NAVE_WALL, ppm: 40,
-      openings: open(probe, side), texts: rooms.filter(r => r.side === side).map(r => ({ ...lettering(probe, r, side > 0), wash: 0.24 })) });
+      openings: open(probe, side), texts: rooms.filter(r => r.side === side).map(r => ({ ...lettering(probe, r, side > 0), ppm: 340 })) });
   }
   makeWall({ c: [0, Z_START], n: [0, -1], len: NW, h: NH, color: NAVE_WALL });
   const nw = D.exhibitions.flatMap(e => e.works.filter(w => w.nave).map(w => ({ w, e })))[0];
@@ -342,8 +368,9 @@ function buildNave() {
   solids.push(flat(-NW / 2, NW / 2, Z_END, Z_START, 0, floorTex(NW, NL, NAVE_FLOOR, 0.38, spills), true, floors, 0.84));
   flat(-NW / 2, NW / 2, Z_END, Z_START, NH, ceilTex(NW, NL, '#CFCBC2', 0.3, [0.3, 0.012, 0.7, 0.988], lamps), false, world);
   // the title wall in the foyer
-  const lines = [{ text: D.name.toUpperCase(), size: 0.62, track: 0.24, lead: 1.75 }, { text: D.line, size: 0.15, font: '"Albert Sans"', style: '300', color: TXT2 }];
-  makeWall({ c: [0, PZ + PT / 2], n: [0, 1], len: PW, h: PH, color: '#F1EFE9', texts: [{ a: PW / 2 + 0.07, y: 2.45, align: 'center', lines, wash: 0.3 }] });
+  const lines = [{ text: D.name.toUpperCase(), size: 0.6, track: 0.22, lead: 1.75 }, { text: D.line, size: 0.16, font: '"Albert Sans"', style: '400', color: TXT2 }];
+  const title = makeWall({ c: [0, PZ + PT / 2], n: [0, 1], len: PW, h: PH, color: '#F1EFE9', texts: [{ a: PW / 2, y: 2.45, align: 'center', lines, ppm: 560, shade: 0.5 }] });
+  title.mesh.userData.start = true;   // a click on it begins the visit
   makeWall({ c: [0, PZ - PT / 2], n: [0, -1], len: PW, h: PH, color: '#F1EFE9', texts: [{ a: 0.45, y: 2.6, lines: [
     { text: D.season, size: 0.3, lead: 1.5 }, { text: D.dates, size: 0.13, font: '"Albert Sans"', color: TXT2, lead: 2.6 },
     ...D.exhibitions.map(e => ({ text: `${e.artist}, ${e.title}`, size: 0.115, font: '"Albert Sans"', lead: 1.62 })),
@@ -533,12 +560,17 @@ function closePanel(keepAudio) {
 $('p-close').addEventListener('click', () => closePanel(false));
 const btn = (text, fn, cls) => { const b = el('button', cls, text); b.type = 'button'; b.addEventListener('click', fn); return b; };
 
+function codeLine(rec) {
+  const c = rec.w.code, p = el('p', 'codeline', `Computed by one program, ${c.lines.toLocaleString('en-US')} lines of Python. `);
+  p.append(btn('Read the code', () => openCode(rec), 'link'));
+  return p;
+}
 function showWork(rec) {
   focus = rec; cur = stops.findIndex(s => s.rec === rec);
   body.replaceChildren(
     el('p', 'kicker', rec.e.artist), el('h2', null, rec.w.title),
     el('p', 'meta', `${rec.w.year}. ${rec.w.medium}. ${rec.w.cm[0]} × ${rec.w.cm[1]} cm`),
-    ...rec.w.story.map(t => el('p', null, t)));
+    ...rec.w.story.map(t => el('p', null, t)), codeLine(rec));
   acts.replaceChildren(btn('Look closer', () => openCloser(rec)));
   openPanel(rec.w.audio, true);
 }
@@ -621,6 +653,80 @@ function buildPlan() {
 $('b-plan').addEventListener('click', () => { $('plan-me').setAttribute('cx', me.x); $('plan-me').setAttribute('cy', me.z); plan.showModal(); });
 plan.querySelector('[data-close]').addEventListener('click', () => plan.close());
 
+// ---------------------------------------------------------------- the code behind a work
+const codeD = $('code'), coPre = $('co-pre'), coCache = new Map();
+const PY_KW = 'def|class|import|from|return|if|elif|else|for|while|in|not|and|or|is|None|True|False|lambda|with|as|try|except|finally|raise|pass|break|continue|yield|global|nonlocal|assert|del';
+const PY_RE = new RegExp(`("{3}[\\s\\S]*?"{3}|'{3}[\\s\\S]*?'{3}|#[^\\n]*|"(?:\\\\.|[^"\\\\\\n])*"|'(?:\\\\.|[^'\\\\\\n])*')|\\b(${PY_KW})\\b`, 'g');
+const escHtml = t => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function colour(src) {   // light syntax colouring: comments, strings, keywords. No library.
+  let out = '', i = 0, m;
+  PY_RE.lastIndex = 0;
+  while ((m = PY_RE.exec(src))) {
+    out += escHtml(src.slice(i, m.index));
+    const cls = m[2] ? 'k' : m[1][0] === '#' ? 'c' : 's';
+    out += `<span class="${cls}">${escHtml(m[0])}</span>`; i = m.index + m[0].length;
+  }
+  return out + escHtml(src.slice(i));
+}
+async function openCode(rec) {
+  const c = rec.w.code, seq = (openCode.seq = (openCode.seq || 0) + 1);
+  $('co-h').textContent = rec.w.title;
+  $('co-meta').textContent = `${rec.e.artist}. ${c.lines.toLocaleString('en-US')} lines of Python, ${c.kb} KB. Plain text: select and copy freely.`;
+  const dl = $('co-dl'); dl.href = c.src; dl.setAttribute('download', c.src.split('/').pop());
+  coPre.replaceChildren(el('span', 'note', 'Loading the program'));
+  $('co-scroll').scrollTo(0, 0);
+  if (!codeD.open) codeD.showModal();
+  $('co-scroll').focus({ preventScroll: true });
+  try {
+    let src = coCache.get(c.src);
+    if (src == null) { const r = await fetch(c.src); if (!r.ok) throw new Error(r.status); src = await r.text(); coCache.set(c.src, src); }
+    if (seq !== openCode.seq || !codeD.open) return;
+    const n = src.replace(/\n$/, '').split('\n').length;
+    const gut = el('span', 'gut'); gut.setAttribute('aria-hidden', 'true'); gut.textContent = Array.from({ length: n }, (_, i) => i + 1).join('\n');
+    const code = el('code'); code.innerHTML = colour(src);
+    coPre.replaceChildren(gut, code);
+  } catch { coPre.replaceChildren(el('span', 'note', 'The program could not be loaded. Use Download .py, or open the code page.')); }
+}
+codeD.querySelector('[data-close]').addEventListener('click', () => codeD.close());
+
+// ---------------------------------------------------------------- the artists
+const artD = $('artists'), arList = $('ar-list'), arDetail = $('ar-detail');
+function buildArtists() {
+  const roomOf = e => rooms.find(r => r.e === e);
+  const pick = (e, btns, b) => {
+    btns.forEach(x => x.setAttribute('aria-current', x === b ? 'true' : 'false'));
+    const r = roomOf(e), thumbs = el('div', 'ar-thumbs');
+    for (const w of e.works) {
+      const rec = works.find(q => q.w === w), t = el('button', 'ar-th'); t.type = 'button';
+      t.setAttribute('aria-label', `${w.title}. Go to this work`);
+      const im = new Image(); im.src = w.t; im.alt = ''; im.loading = 'lazy'; im.decoding = 'async'; t.append(im, el('span', null, w.title));
+      t.addEventListener('click', () => { artD.close(); if (rec) toStop(stops.findIndex(s => s.rec === rec)); });
+      thumbs.append(t);
+    }
+    const go = btn('Go to this exhibition', () => { artD.close(); if (r) toStop(stops.findIndex(s => s.kind === 'intro' && s.room === r)); }, 'primary');
+    arDetail.replaceChildren(el('h3', null, e.artist), el('p', 'ar-origin', e.origin), el('p', 'ar-show', e.title),
+      ...e.bio.map(t => el('p', null, t)), el('h4', null, e.works.length === 1 ? 'The work' : 'The works'), thumbs, go);
+    arDetail.scrollTop = 0; arDetail.closest('.ar-body').scrollTop = 0;
+  };
+  const btns = D.exhibitions.map(e => {
+    const b = el('button', 'ar-b'); b.type = 'button'; b.append(el('b', null, e.artist), el('span', null, e.title));
+    b.addEventListener('click', () => pick(e, btns, b));
+    const li = el('li'); li.append(b); arList.append(li); return b;
+  });
+  arList.addEventListener('keydown', e => {
+    const i = btns.indexOf(document.activeElement); if (i < 0) return;
+    const j = { ArrowDown: i + 1, ArrowRight: i + 1, ArrowUp: i - 1, ArrowLeft: i - 1, Home: 0, End: btns.length - 1 }[e.key];
+    if (j == null || j < 0 || j >= btns.length) return;
+    e.preventDefault(); btns[j].focus(); btns[j].click();
+  });
+  $('b-artists').addEventListener('click', () => {
+    artD.showModal();
+    const here = rooms[spaceOf(me.x, me.z)], i = Math.max(0, D.exhibitions.findIndex(e => here && e === here.e));
+    btns[i].click(); btns[i].focus();
+  });
+  artD.querySelector('[data-close]').addEventListener('click', () => artD.close());
+}
+
 // ---------------------------------------------------------------- zoom
 // Optical zoom: the field of view narrows and yaw/pitch shift so the point under the pointer stays under the pointer.
 const tanH = f => Math.tan(THREE.MathUtils.degToRad(f / 2));
@@ -661,6 +767,7 @@ const pick = (cx, cy) => {
 };
 function clickAt(cx, cy) {   // the single click: walk to the picture or the spot on the floor
   const h = pick(cx, cy); if (!h) return;
+  if (h.object.userData.start) { if (cur < 0) nextStop(1); else toStop(0); return; }
   if (recOf.has(h.object)) { toStop(stops.findIndex(s => s.rec === recOf.get(h.object))); return; }
   if (Math.abs(h.point.y) < 0.05) {
     let { x, z } = h.point;
@@ -690,7 +797,7 @@ canvas.addEventListener('pointermove', e => {
     if (pinchD && d) { walk = walk && walk.settle ? null : walk; setZoom(zoomT * d / pinchD, (a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2, true); }
     pinchD = d; return;
   }
-  if (!drag) { if (e.pointerType === 'mouse') { const h = pick(e.clientX, e.clientY); canvas.style.cursor = h && recOf.has(h.object) ? 'pointer' : 'grab'; } return; }
+  if (!drag) { if (e.pointerType === 'mouse') { const h = pick(e.clientX, e.clientY); canvas.style.cursor = h && (recOf.has(h.object) || h.object.userData.start) ? 'pointer' : 'grab'; } return; }
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY;
   if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) > 6) drag.moved = true;
   if (!drag.moved) return;
@@ -722,7 +829,7 @@ canvas.addEventListener('wheel', e => {   // wheel, and trackpad pinch (which ar
 const KEYS = { arrowup: 'f', w: 'f', arrowdown: 'b', s: 'b', arrowleft: 'l', q: 'l', arrowright: 'r', e: 'r', a: 'sl', d: 'sr' };
 const typing = t => t && (t.isContentEditable || /^(input|textarea|select)$/i.test(t.tagName));
 addEventListener('keydown', e => {
-  if (!entered || plan.open || dlg.open || e.metaKey || e.ctrlKey || e.altKey || typing(e.target)) return;
+  if (!entered || plan.open || dlg.open || codeD.open || artD.open || e.metaKey || e.ctrlKey || e.altKey || typing(e.target)) return;
   const k = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
   if (KEYS[k]) { keys.add(KEYS[k]); e.preventDefault(); hideHint(); }
   else if (k === 'n' || k === 'pagedown') { e.preventDefault(); nextStop(1); }
@@ -865,7 +972,7 @@ function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
   if (document.hidden) return;
-  if (dlg.open || plan.open) { keys.clear(); vel.f = vel.s = vel.t = 0; return; }
+  if (dlg.open || plan.open || codeD.open || artD.open) { keys.clear(); vel.f = vel.s = vel.t = 0; return; }
   step(dt); stepZoom(dt);
   shiftX += (shiftTX - shiftX) * Math.min(1, dt * 5); shiftY += (shiftTY - shiftY) * Math.min(1, dt * 5);
   if (Math.abs(shiftX) > 0.5 || Math.abs(shiftY) > 0.5) camera.setViewOffset(innerWidth, innerHeight, shiftX, shiftY, innerWidth, innerHeight);
@@ -881,7 +988,7 @@ function frame(now) {
 async function init() {
   resize();
   try { await Promise.all([document.fonts.load('40px Marcellus'), document.fonts.load('300 20px "Albert Sans"'), document.fonts.load('italic 20px "Albert Sans"'), document.fonts.load('600 20px "Albert Sans"')]); } catch {}
-  rooms.forEach(buildRoom); buildNave(); buildCollision(); buildStops(); buildPlan();
+  rooms.forEach(buildRoom); buildNave(); buildCollision(); buildStops(); buildPlan(); buildArtists();
   const mirror = world.clone(true); mirror.scale.y = -1; scene.add(mirror);
   requestAnimationFrame(frame);
   await Promise.all(works.map(rec => setLevel(rec, 0)));

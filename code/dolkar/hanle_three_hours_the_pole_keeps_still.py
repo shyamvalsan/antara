@@ -1,0 +1,1343 @@
+#!/usr/bin/env python3
+"""
+Hanle, three hours, the pole keeps still
+Stanzin Dolkar
+
+Three hours of sky over the gompa at Hanle, 4,500 m, latitude 32.78 N.
+Camera: 14 mm rectilinear lens on a 24 x 36 mm frame held upright, pitched
+34 degrees above the horizon and turned 3.5 degrees east of north.  Every star
+is rotated through 45 degrees of hour angle about the celestial pole and
+projected through that lens; nothing is traced, no catalogue is used.
+The ground is ray-marched terrain; the gompa is battered boxes.
+
+Everything is seeded.  HANLE_SCALE=0.4 gives a quick draft.
+HANLE_CROP=x0,y0,x1,y1 (full-size pixel coordinates) renders one detail.
+"""
+import os
+import math
+import time
+import numpy as np
+from numba import njit, prange
+from PIL import Image
+from scipy.ndimage import gaussian_filter
+
+SEED = 3278_7896
+SCALE = float(os.environ.get("HANLE_SCALE", "1.0"))
+W0, H0 = 2700, 3600
+W, H = int(round(W0 * SCALE)), int(round(H0 * SCALE))
+FPX = 1400.0 * SCALE                 # 14 mm on a 36 mm long side
+CX, CY = W / 2.0, H / 2.0
+LAT = math.radians(32.78)
+PITCH = math.radians(34.0)
+YAW = math.radians(3.5)
+HOURS = 3.0
+THETA = math.radians(15.041 * HOURS)  # sidereal
+
+NJ = dict(cache=True, fastmath=True, error_model='numpy')
+
+# ----------------------------------------------------------------------------
+# noise
+# ----------------------------------------------------------------------------
+
+@njit(**NJ)
+def hash2(ix, iy, seed):
+    n = np.int64(ix) * np.int64(374761393) + np.int64(iy) * np.int64(668265263) + np.int64(seed) * np.int64(2246822519)
+    n = (n ^ (n >> np.int64(13))) * np.int64(1274126177)
+    n = n ^ (n >> np.int64(16))
+    return (n & np.int64(0xFFFFFF)) / 16777216.0
+
+
+@njit(**NJ)
+def hash3(ix, iy, iz, seed):
+    n = (np.int64(ix) * np.int64(374761393) + np.int64(iy) * np.int64(668265263)
+         + np.int64(iz) * np.int64(1103515245) + np.int64(seed) * np.int64(2246822519))
+    n = (n ^ (n >> np.int64(13))) * np.int64(1274126177)
+    n = n ^ (n >> np.int64(16))
+    return (n & np.int64(0xFFFFFF)) / 16777216.0
+
+
+@njit(**NJ)
+def vnoise2(x, y, seed):
+    fx = math.floor(x); fy = math.floor(y)
+    ix = int(fx); iy = int(fy)
+    tx = x - fx; ty = y - fy
+    tx = tx * tx * tx * (tx * (tx * 6 - 15) + 10)
+    ty = ty * ty * ty * (ty * (ty * 6 - 15) + 10)
+    a = hash2(ix, iy, seed); b = hash2(ix + 1, iy, seed)
+    c = hash2(ix, iy + 1, seed); d = hash2(ix + 1, iy + 1, seed)
+    return (a + (b - a) * tx) * (1 - ty) + (c + (d - c) * tx) * ty
+
+
+GRX = np.cos(np.arange(64) * (2 * np.pi / 64) + 0.1)
+GRY = np.sin(np.arange(64) * (2 * np.pi / 64) + 0.1)
+
+
+@njit(**NJ)
+def gnoise2(x, y, seed):
+    """gradient noise, about -1..1"""
+    fx = math.floor(x); fy = math.floor(y)
+    ix = int(fx); iy = int(fy)
+    tx = x - fx; ty = y - fy
+    sx = tx * tx * tx * (tx * (tx * 6 - 15) + 10)
+    sy = ty * ty * ty * (ty * (ty * 6 - 15) + 10)
+    k0 = int(hash2(ix, iy, seed) * 64.0)
+    k1 = int(hash2(ix + 1, iy, seed) * 64.0)
+    k2 = int(hash2(ix, iy + 1, seed) * 64.0)
+    k3 = int(hash2(ix + 1, iy + 1, seed) * 64.0)
+    g0 = GRX[k0] * tx + GRY[k0] * ty
+    g1 = GRX[k1] * (tx - 1) + GRY[k1] * ty
+    g2 = GRX[k2] * tx + GRY[k2] * (ty - 1)
+    g3 = GRX[k3] * (tx - 1) + GRY[k3] * (ty - 1)
+    return 1.5 * ((g0 + (g1 - g0) * sx) * (1 - sy) + (g2 + (g3 - g2) * sx) * sy)
+
+
+@njit(**NJ)
+def gfbm(x, y, o, seed):
+    s = 0.0; a = 0.5
+    for i in range(o):
+        s += a * gnoise2(x, y, seed + i)
+        nx = 1.616 * x - 1.212 * y + 3.7
+        y = 1.212 * x + 1.616 * y - 1.3
+        x = nx
+        a *= 0.5
+    return s
+
+
+@njit(**NJ)
+def ridged(x, y, o, seed):
+    s = 0.0; a = 0.5; w = 1.0
+    for i in range(o):
+        r = 1.0 - abs(gnoise2(x, y, seed + i))
+        r = r * r
+        s += a * r * w
+        w = min(1.0, max(0.0, r * 1.7))
+        nx = 1.616 * x - 1.212 * y + 3.7
+        y = 1.212 * x + 1.616 * y - 1.3
+        x = nx
+        a *= 0.5
+    return s
+
+
+@njit(**NJ)
+def vnoise3(x, y, z, seed):
+    fx = math.floor(x); fy = math.floor(y); fz = math.floor(z)
+    ix = int(fx); iy = int(fy); iz = int(fz)
+    tx = x - fx; ty = y - fy; tz = z - fz
+    tx = tx * tx * (3 - 2 * tx); ty = ty * ty * (3 - 2 * ty); tz = tz * tz * (3 - 2 * tz)
+    a = hash3(ix, iy, iz, seed); b = hash3(ix + 1, iy, iz, seed)
+    c = hash3(ix, iy + 1, iz, seed); d = hash3(ix + 1, iy + 1, iz, seed)
+    e = hash3(ix, iy, iz + 1, seed); f = hash3(ix + 1, iy, iz + 1, seed)
+    g = hash3(ix, iy + 1, iz + 1, seed); h = hash3(ix + 1, iy + 1, iz + 1, seed)
+    p = (a + (b - a) * tx) * (1 - ty) + (c + (d - c) * tx) * ty
+    q = (e + (f - e) * tx) * (1 - ty) + (g + (h - g) * tx) * ty
+    return p + (q - p) * tz
+
+
+@njit(**NJ)
+def fbm3(x, y, z, o, seed):
+    s = 0.0; a = 0.5
+    for i in range(o):
+        s += a * vnoise3(x, y, z, seed + i)
+        x = x * 2.03 + 1.7; y = y * 2.03 - 2.1; z = z * 2.03 + 0.9
+        a *= 0.5
+    return s
+
+
+@njit(**NJ)
+def sstep(a, b, x):
+    t = (x - a) / (b - a)
+    if t < 0.0:
+        t = 0.0
+    elif t > 1.0:
+        t = 1.0
+    return t * t * (3 - 2 * t)
+
+
+# ----------------------------------------------------------------------------
+# the ground, in metres.  x east, y north, z up.  The eye stands at the origin.
+# ----------------------------------------------------------------------------
+KNOLL_H = 16.0
+SPX, SPY = -4.0, 288.0          # summit of the gompa spur
+SP_TH = math.radians(-9.0)
+SP_C, SP_S = math.cos(SP_TH), math.sin(SP_TH)
+SP_H = 62.0
+
+
+@njit(**NJ)
+def spur_uv(x, y):
+    dx = x - SPX; dy = y - SPY
+    return dx * SP_C + dy * SP_S, -dx * SP_S + dy * SP_C
+
+
+@njit(**NJ)
+def spur_mask(x, y):
+    u, v = spur_uv(x, y)
+    if abs(u) > 450.0 or abs(v) > 350.0:
+        return 0.0, 0.0
+    if u < 0:
+        cu = math.exp(-(-u / 60.0) ** 3.2)
+    else:
+        cu = math.exp(-(u / 92.0) ** 2.3)
+    wv = 46.0 if v < 0 else 64.0
+    gv = math.exp(-(abs(v) / wv) ** 2.6)
+    m = cu * gv
+    ul = (u - 128.0) / 52.0; vl = (v + 8.0) / 34.0
+    m2 = math.exp(-(ul * ul + vl * vl))
+    return m, m2
+
+
+@njit(**NJ)
+def mtn_mask(x, y):
+    if y < 1200.0 and abs(x) < 1200.0:
+        return 0.0
+    xa = x - 0.10 * y
+    wl = sstep(2300.0, 7600.0, abs(xa) + 1800.0 * (vnoise2(x / 4200.0 + 3.0, y / 4200.0, 131) - 0.5))
+    wf = sstep(9000.0, 21000.0, y + 5000.0 * (vnoise2(x / 6000.0, y / 6000.0 + 5.0, 132) - 0.5))
+    return 1.0 - (1.0 - wl) * (1.0 - wf)
+
+
+@njit(**NJ)
+def knoll_mask(x, y):
+    r2 = x * x + (y + 6.0) * (y + 6.0)
+    if r2 > 230.0 * 230.0:
+        return 0.0
+    return math.exp(-r2 / (48.0 * 48.0))
+
+
+@njit(**NJ)
+def terrain(x, y, lod):
+    h = 1.6 * (vnoise2(x * 0.0019 + 7.3, y * 0.0019 + 1.7, 101) - 0.5) \
+        + 0.5 * (vnoise2(x * 0.011, y * 0.011, 102) - 0.5)
+    if lod < 0.6:
+        h += 0.10 * gfbm(x * 0.35, y * 0.35, 2, 103)
+    # the rock the eye stands on
+    k = knoll_mask(x, y)
+    if k > 0.003:
+        h += KNOLL_H * k
+        h += k ** 0.7 * 2.6 * gfbm(x * 0.04, y * 0.04, 4, 111)
+        if lod < 0.6:
+            h += k * 0.42 * (ridged(x * 0.33, y * 0.33, 3, 112) - 0.4)
+        if lod < 0.12:
+            h += k * 0.07 * gfbm(x * 2.6, y * 2.6, 3, 113)
+            h += k * 0.11 * (ridged(x * 3.1, y * 3.1, 3, 115) - 0.4)
+        if lod < 0.35 and k > 0.08:
+            for q in range(2):
+                cs_ = 1.9 if q == 0 else 0.8
+                gx_ = math.floor(x / cs_); gy_ = math.floor(y / cs_)
+                ig = int(gx_); jg = int(gy_)
+                if hash2(ig, jg, 114 + q) < (0.30 if q == 0 else 0.34):
+                    rb_ = cs_ * (0.12 + 0.22 * hash2(ig, jg, 116 + q)) * (1.0 + 0.30 * gnoise2(x * 1.9, y * 1.9, 119))
+                    bx_ = (gx_ + 0.5 + 0.3 * (hash2(ig, jg, 118 + q) - 0.5)) * cs_
+                    by_ = (gy_ + 0.5 + 0.3 * (hash2(ig, jg, 120 + q) - 0.5)) * cs_
+                    dd = (x - bx_) ** 2 + (y - by_) ** 2
+                    if dd < rb_ * rb_:
+                        h += 0.62 * math.sqrt(rb_ * rb_ - dd)
+    # the gompa spur
+    m, m2 = spur_mask(x, y)
+    if m + m2 > 0.0:
+        u, v = spur_uv(x, y)
+        hs = SP_H * m + 26.0 * m2
+        hs += 7.0 * math.exp(-((u - 20.0) / 190.0) ** 2 - (v / 140.0) ** 2)
+        mm = min(1.0, m + m2)
+        if mm > 0.004:
+            flank = 4.0 * mm * (1.0 - mm)
+            oc = 5 if lod < 1.2 else (4 if lod < 3 else 3)
+            cr = ridged(x * 0.021 + 5.1, y * 0.021, oc, 121)
+            hs += (0.20 + 0.80 * flank) * math.sqrt(mm) * 16.0 * (cr - 0.42)
+            # ribs and gullies running down the fall line
+            rad = math.sqrt(u * u + v * v) + 1.0
+            wq = 0.9 * gnoise2(x * 0.012, y * 0.012, 126)
+            rib = ridged(u / rad * 2.3 + rad * 0.006 + 7.0 + wq, v / rad * 2.3 + 2.0 - wq, 4, 125)
+            hs += flank * 3.6 * (rib - 0.45) * (0.4 + 1.2 * vnoise2(x * 0.017, y * 0.017 + 4.0, 127))
+            # outcrops: steps where the rock breaks through the scree
+            oc_ = gfbm(x * 0.031 + 1.0, y * 0.031, 3, 128)
+            hs += flank * 5.0 * sstep(0.05, 0.22, oc_)
+            if lod < 1.0:
+                hs += math.sqrt(mm) * 0.8 * gfbm(x * 0.22, y * 0.22, 3, 122)
+                hs += math.sqrt(mm) * 0.50 * (ridged(x * 0.62, y * 0.62, 3, 129) - 0.4)
+        h += hs
+    # the ranges
+    M = mtn_mask(x, y)
+    if M > 0.0:
+        oc = int(math.log2(7500.0 / (1.5 * lod + 1e-3)))
+        if oc < 3:
+            oc = 3
+        elif oc > 10:
+            oc = 10
+        r = ridged(x / 7500.0 + 11.3, y / 7500.0 + 4.1, oc, 141)
+        h += 150.0 * M + 1750.0 * r * sstep(0.0, 0.45, M) * (0.22 + 0.78 * M)
+        o2 = oc - 2 if oc > 4 else 2
+        h += 460.0 * (ridged(x / 2100.0 + 3.3, y / 2100.0 + 8.1, o2, 151) - 0.30) * sstep(0.0, 0.30, M)
+    return h
+
+
+@njit(**NJ)
+def water_band(x, y):
+    """>0 inside a channel of the marsh river; value is depth into the band 0..1"""
+    if y < 40.0 or y > 9000.0 or abs(x) > 5000.0:
+        return 0.0, 0.0
+    wx = x + 60.0 * gnoise2(x * 0.004, y * 0.004, 151)
+    wy = y + 60.0 * gnoise2(x * 0.004 + 9.0, y * 0.004, 152)
+    n = vnoise2(wx * 0.0024 + 0.83, wy * 0.0031 + 0.37, 153)
+    d = abs(n - 0.5)
+    th = 0.015
+    n2 = vnoise2(wx * 0.0061 + 4.1, wy * 0.0075 + 2.2, 154)
+    d2 = abs(n2 - 0.52)
+    wet = max(1.0 - d / th, 1.0 - d2 / 0.007)
+    near = max(1.0 - d / (th * 3.5), 1.0 - d2 / 0.025)
+    m, m2 = spur_mask(x, y)
+    k = knoll_mask(x, y)
+    zone = (1.0 - sstep(0.004, 0.03, m + m2)) * (1.0 - sstep(0.01, 0.06, k)) * (1.0 - sstep(0.0, 0.02, mtn_mask(x, y)))
+    u, v = spur_uv(x, y)
+    zone *= sstep(0.0, 1.0, (abs(u - 20.0) / 230.0) ** 2 + (v / 170.0) ** 2 - 0.9)
+    return max(0.0, wet) * zone, max(0.0, near) * zone
+
+
+@njit(**NJ)
+def march(ox, oy, oz, dx, dy, dz, fpx, tmax):
+    t = 0.3; tp = 0.0
+    for i in range(8000):
+        px = ox + dx * t; py = oy + dy * t; pz = oz + dz * t
+        lod = t / fpx
+        d = pz - terrain(px, py, lod * 3.0)
+        if d < 0.0:
+            a = tp; b = t
+            for k in range(14):
+                mth = 0.5 * (a + b)
+                if oz + dz * mth - terrain(ox + dx * mth, oy + dy * mth, lod * 3.0) < 0.0:
+                    b = mth
+                else:
+                    a = mth
+            return b
+        tp = t
+        st = 0.45 * d
+        mn = 0.006 * t
+        if st < mn:
+            st = mn
+        if st < 0.02:
+            st = 0.02
+        t += st
+        if t > tmax or (dz > 0.0 and pz > 2900.0):
+            return -1.0
+    return -1.0
+
+
+# ----------------------------------------------------------------------------
+# the gompa: battered boxes.  B row: cx cy cos sin a b ztop zbot batter mat storeys id
+# face: 0 +x  1 -x  2 +y  3 -y  4 top  5 bottom   (box-local; -y looks at the eye)
+# ----------------------------------------------------------------------------
+
+@njit(**NJ)
+def hit_box(B, i, ox, oy, oz, dx, dy, dz):
+    c = B[i, 2]; s = B[i, 3]; a = B[i, 4]; b = B[i, 5]; k = B[i, 8]
+    rx = ox - B[i, 0]; ry = oy - B[i, 1]
+    lx = rx * c + ry * s; ly = -rx * s + ry * c; lz = oz - B[i, 6]
+    ex = dx * c + dy * s; ey = -dx * s + dy * c; ez = dz
+    zb = B[i, 7] - B[i, 6]
+    tin = -1e30; tout = 1e30; face = -1
+    for f in range(6):
+        if f == 0:
+            den = ex + k * ez; num = a - (lx + k * lz)
+        elif f == 1:
+            den = -ex + k * ez; num = a - (-lx + k * lz)
+        elif f == 2:
+            den = ey + k * ez; num = b - (ly + k * lz)
+        elif f == 3:
+            den = -ey + k * ez; num = b - (-ly + k * lz)
+        elif f == 4:
+            den = ez; num = -lz
+        else:
+            den = -ez; num = lz - zb
+        if den > 1e-12:
+            tt = num / den
+            if tt < tout:
+                tout = tt
+        elif den < -1e-12:
+            tt = num / den
+            if tt > tin:
+                tin = tt; face = f
+        elif num < 0.0:
+            return -1.0, -1
+        if tin > tout:
+            return -1.0, -1
+    if tin < 1e-4:
+        return -1.0, -1
+    return tin, face
+
+
+@njit(**NJ)
+def hit_sphere(S, j, ox, oy, oz, dx, dy, dz):
+    rx = ox - S[j, 0]; ry = oy - S[j, 1]; rz = oz - S[j, 2]
+    b = rx * dx + ry * dy + rz * dz
+    c = rx * rx + ry * ry + rz * rz - S[j, 3] * S[j, 3]
+    disc = b * b - c
+    if disc < 0.0:
+        return -1.0
+    t = -b - math.sqrt(disc)
+    if t < 1e-4:
+        return -1.0
+    return t
+
+
+@njit(**NJ)
+def scene_hit(B, S, ox, oy, oz, dx, dy, dz):
+    best = 1e30; kind = -1; idx = -1; face = -1
+    for i in range(B.shape[0]):
+        t, f = hit_box(B, i, ox, oy, oz, dx, dy, dz)
+        if t > 0.0 and t < best:
+            best = t; kind = 0; idx = i; face = f
+    for j in range(S.shape[0]):
+        t = hit_sphere(S, j, ox, oy, oz, dx, dy, dz)
+        if t > 0.0 and t < best:
+            best = t; kind = 1; idx = j; face = 0
+    return best, kind, idx, face
+
+
+@njit(**NJ)
+def blocked(B, S, ox, oy, oz, dx, dy, dz, tmax):
+    for i in range(B.shape[0]):
+        t, f = hit_box(B, i, ox, oy, oz, dx, dy, dz)
+        if t > 0.0 and t < tmax:
+            return True
+    for j in range(S.shape[0]):
+        t = hit_sphere(S, j, ox, oy, oz, dx, dy, dz)
+        if t > 0.0 and t < tmax:
+            return True
+    return False
+
+
+@njit(**NJ)
+def sky_light(B, S, px, py, pz, nx, ny, nz, seed, nray, use_terrain):
+    """irradiance from the night sky dome at a point, with occlusion; about 1.0 for open flat ground.
+    second value: the same without any occluders (for ratios)."""
+    # tangent frame
+    if abs(nz) < 0.9:
+        tx = -ny; ty = nx; tz = 0.0
+    else:
+        tx = 1.0; ty = 0.0; tz = 0.0
+    d = tx * nx + ty * ny + tz * nz
+    tx -= d * nx; ty -= d * ny; tz -= d * nz
+    l = math.sqrt(tx * tx + ty * ty + tz * tz)
+    tx /= l; ty /= l; tz /= l
+    bx = ny * tz - nz * ty; by = nz * tx - nx * tz; bz = nx * ty - ny * tx
+    r0 = hash2(seed, 17, 901); r1 = hash2(seed, 31, 902)
+    acc = 0.0; free = 0.0
+    for i in range(nray):
+        u1 = (i + r0) / nray
+        u2 = (i * 0.61803398875 + r1) % 1.0
+        r = math.sqrt(u1); ph = 6.2831853 * u2
+        lx = r * math.cos(ph); ly = r * math.sin(ph); lz = math.sqrt(max(0.0, 1.0 - u1))
+        wx = lx * tx + ly * bx + lz * nx
+        wy = lx * ty + ly * by + lz * ny
+        wz = lx * tz + ly * bz + lz * nz
+        if wz <= 0.0:
+            val = 0.10
+        else:
+            q = 1.0 - wz
+            val = 0.62 + 1.25 * q * q * q
+        free += val
+        occ = blocked(B, S, px, py, pz, wx, wy, wz, 400.0)
+        if (not occ) and use_terrain and wz > -0.3:
+            for sdist in (2.5, 7.0, 16.0, 38.0, 90.0):
+                if terrain(px + wx * sdist, py + wy * sdist, 1.0) > pz + wz * sdist + 0.3:
+                    occ = True
+                    break
+        if occ:
+            val = 0.035
+        acc += val
+    return acc / nray / 0.80, free / nray / 0.80
+
+
+# ----------------------------------------------------------------------------
+# sky
+# ----------------------------------------------------------------------------
+
+@njit(**NJ)
+def airmass(sz):
+    if sz < 0.0:
+        sz = 0.0
+    return 1.0 / (sz + 0.025 * math.exp(-11.0 * sz))
+
+
+KR, KG, KB = 0.070, 0.105, 0.175     # optical depth per airmass at 4,500 m
+
+
+@njit(**NJ)
+def sky_bg(dx, dy, dz):
+    """moonless background: zodiacal and faint-star continuum, airglow in two layers,
+    extinction and a little scattering low down.  Linear, arbitrary units."""
+    sz = dz if dz > 0.0 else 0.0
+    X = airmass(sz)
+    s2 = 1.0 - sz * sz
+    v1 = 1.0 / math.sqrt(1.0 - 0.9723 * s2)       # 90 km layer (557.7 nm green, OH)
+    v2 = 1.0 / math.sqrt(1.0 - 0.9260 * s2)       # 250 km layer (630 nm red)
+    # banding in the green layer: gravity waves, smeared by three hours
+    qx = dx / (sz + 0.18); qy = dy / (sz + 0.18)
+    n1 = fbm3(qx * 0.55 + 3.1, qy * 1.9, 0.3, 3, 301)
+    n2 = fbm3(qx * 0.30 + 1.2, qy * 0.5, 4.7, 2, 311)
+    green = v1 * (0.72 + 0.56 * n1)
+    red = v2 * (0.60 + 0.80 * n2)
+    tr = math.exp(-KR * X); tg = math.exp(-KG * X); tb = math.exp(-KB * X)
+    r = (0.0008 + 0.00050 * green + 0.00085 * red) * tr
+    g = (0.0030 + 0.00340 * green + 0.00022 * red) * tg
+    b = (0.0145 + 0.00290 * green + 0.00018 * red) * tb
+    # light scattered back into the line of sight by the lower air
+    sc = 0.0075 * (1.0 - math.exp(-0.085 * X))
+    r += sc * 0.42 * (0.55 + 0.45 * tr)
+    g += sc * 1.00 * (0.55 + 0.45 * tg)
+    b += sc * 1.12 * (0.55 + 0.45 * tb)
+    return r, g, b
+
+
+@njit(**NJ)
+def galaxy(vx, vy, vz, G):
+    """outer Milky Way seen from inside: returns glow (density x transmission) and
+    the transmission alone.  G rows: pole, x (l=0), y."""
+    sb = vx * G[0, 0] + vy * G[0, 1] + vz * G[0, 2]
+    gx = vx * G[1, 0] + vy * G[1, 1] + vz * G[1, 2]
+    gy = vx * G[2, 0] + vy * G[2, 1] + vz * G[2, 2]
+    b = math.degrees(math.asin(max(-1.0, min(1.0, sb))))
+    l = math.degrees(math.atan2(gy, gx))
+    warp = 1.5 * math.sin(math.radians(l) * 2.3 + 0.6)
+    bb = b - warp
+    dens = math.exp(-abs(bb) / 8.5) * (0.80 + 0.20 * math.sin(math.radians(l) + 0.5))
+    dens += 0.5 * math.exp(-(bb / 3.2) ** 2) * (0.5 + fbm3(vx * 7.0, vy * 7.0, vz * 7.0, 3, 401))
+    # the rift along the plane
+    br = 1.0 + 1.3 * math.sin(math.radians(l) * 4.1 + 1.0)
+    wr = 1.25 + 0.45 * math.sin(math.radians(l) * 6.3)
+    clump = fbm3(vx * 11.0 + 5.0, vy * 11.0, vz * 11.0, 4, 411)
+    tau = 2.9 * math.exp(-((bb - br) / wr) ** 2) * (0.35 + 1.3 * clump)
+    # clouds off the plane
+    cl = fbm3(vx * 5.0, vy * 5.0 + 2.0, vz * 5.0, 4, 421)
+    tau += 5.0 * math.exp(-(bb / 7.0) ** 2) * max(0.0, cl - 0.52)
+    # the tent rope: one thin strand leaving the rift
+    if abs(l - 4.0) < 16.0:
+        rb = br + 3.1 + 0.16 * (l - 4.0) + 0.35 * math.sin(l * 0.9)
+        tp = 1.0 - ((l - 4.0) / 16.0) ** 2
+        tau += 3.4 * tp * math.exp(-((bb - rb) / 0.42) ** 2)
+    tr = math.exp(-tau)
+    return dens * tr, tr
+
+
+@njit(**NJ)
+def rope_b(l):
+    br = 1.0 + 1.3 * math.sin(math.radians(l) * 4.1 + 1.0)
+    return br + 3.1 + 0.16 * (l - 4.0) + 0.35 * math.sin(l * 0.9) + 1.5 * math.sin(math.radians(l) * 2.3 + 0.6)
+
+
+@njit(parallel=True, **NJ)
+def render_sky(Wd, Hd, step, fpx, cx, cy, CAM, P, G, theta, nsm):
+    """background colour and the smeared galactic glow on a coarse grid"""
+    bg = np.zeros((Hd, Wd, 3), np.float32)
+    gl = np.zeros((Hd, Wd), np.float32)
+    for j in prange(Hd):
+        for i in range(Wd):
+            X = (i * step - cx); Y = (cy - j * step)
+            dx = CAM[0, 0] * fpx + CAM[1, 0] * X + CAM[2, 0] * Y
+            dy = CAM[0, 1] * fpx + CAM[1, 1] * X + CAM[2, 1] * Y
+            dz = CAM[0, 2] * fpx + CAM[1, 2] * X + CAM[2, 2] * Y
+            l = 1.0 / math.sqrt(dx * dx + dy * dy + dz * dz)
+            dx *= l; dy *= l; dz *= l
+            r, g, b = sky_bg(dx, dy, dz)
+            bg[j, i, 0] = r; bg[j, i, 1] = g; bg[j, i, 2] = b
+            if dz > -0.02:
+                c = dx * P[0] + dy * P[1] + dz * P[2]
+                ax = c * P[0]; ay = c * P[1]; az = c * P[2]
+                e1x = dx - ax; e1y = dy - ay; e1z = dz - az
+                e2x = P[1] * e1z - P[2] * e1y; e2y = P[2] * e1x - P[0] * e1z; e2z = P[0] * e1y - P[1] * e1x
+                s = 0.0
+                for k in range(nsm):
+                    th = (k + 0.5) / nsm * theta
+                    ct = math.cos(th); st = math.sin(th)
+                    vx = ax + e1x * ct + e2x * st      # back to the sky as it stood at the start
+                    vy = ay + e1y * ct + e2y * st
+                    vz = az + e1z * ct + e2z * st
+                    gg, tt = galaxy(vx, vy, vz, G)
+                    s += gg
+                gl[j, i] = s / nsm
+    return bg, gl
+
+
+@njit(**NJ)
+def star_accept(V, mag, G, rnd):
+    n = V.shape[0]
+    keep = np.zeros(n, np.bool_)
+    for i in range(n):
+        gg, tt = galaxy(V[i, 0], V[i, 1], V[i, 2], G)
+        c = 0.30 + 0.30 * max(0.0, mag[i] - 3.5)
+        p = (0.5 * (0.35 + 0.65 * tt) + c * gg) / (0.5 + c)
+        keep[i] = rnd[i] < p
+    return keep
+
+
+@njit(**NJ)
+def draw_trails(buf, V, flux, col, P, CAM, fpx, cx, cy, theta, step, kdep):
+    """every star as its arc: equal hour angle for all, exact rotation about the pole,
+    projected through the lens, with extinction recomputed along the way."""
+    Hh, Ww = buf.shape[0], buf.shape[1]
+    n = V.shape[0]
+    drawn = 0
+    for i in range(n):
+        sx = V[i, 0]; sy = V[i, 1]; sz = V[i, 2]
+        c = sx * P[0] + sy * P[1] + sz * P[2]
+        ax = c * P[0]; ay = c * P[1]; az = c * P[2]
+        e1x = sx - ax; e1y = sy - ay; e1z = sz - az
+        e2x = P[1] * e1z - P[2] * e1y; e2y = P[2] * e1x - P[0] * e1z; e2z = P[0] * e1y - P[1] * e1x
+        # coarse pass: is any of it in the frame, and how long is it in pixels
+        length = 0.0; inside = False; ppx = 0.0; ppy = 0.0; have = False
+        NC = 24
+        for k in range(NC + 1):
+            th = k / NC * theta
+            ct = math.cos(th); st = math.sin(th)
+            vx = ax + e1x * ct - e2x * st; vy = ay + e1y * ct - e2y * st; vz = az + e1z * ct - e2z * st
+            zc = vx * CAM[0, 0] + vy * CAM[0, 1] + vz * CAM[0, 2]
+            if zc < 0.15:
+                have = False
+                continue
+            px = cx + fpx * (vx * CAM[1, 0] + vy * CAM[1, 1] + vz * CAM[1, 2]) / zc
+            py = cy - fpx * (vx * CAM[2, 0] + vy * CAM[2, 1] + vz * CAM[2, 2]) / zc
+            if px > -80 and px < Ww + 80 and py > -80 and py < Hh + 80 and vz > -0.03:
+                inside = True
+            if have:
+                length += math.sqrt((px - ppx) ** 2 + (py - ppy) ** 2)
+            ppx = px; ppy = py; have = True
+        if not inside:
+            continue
+        drawn += 1
+        ns = int(length / step) + 2
+        dth = theta / ns
+        dep = kdep * flux[i] * dth
+        ph = hash2(i, 7, 77) * 6.28
+        for k in range(ns):
+            th = (k + 0.5) * dth
+            ct = math.cos(th); st = math.sin(th)
+            vx = ax + e1x * ct - e2x * st; vy = ay + e1y * ct - e2y * st; vz = az + e1z * ct - e2z * st
+            if vz < -0.01:
+                continue
+            zc = vx * CAM[0, 0] + vy * CAM[0, 1] + vz * CAM[0, 2]
+            if zc < 0.15:
+                continue
+            px = cx + fpx * (vx * CAM[1, 0] + vy * CAM[1, 1] + vz * CAM[1, 2]) / zc
+            py = cy - fpx * (vx * CAM[2, 0] + vy * CAM[2, 1] + vz * CAM[2, 2]) / zc
+            if px < 0.0 or px >= Ww - 1.0 or py < 0.0 or py >= Hh - 1.0:
+                continue
+            X = airmass(vz)
+            # transparency drifting through the night, and the star's own slow flicker low down
+            tn = vnoise3(vx * 3.2 + th * 2.6, vy * 3.2, vz * 3.2 - th * 1.9, 501)
+            mod = 0.90 + 0.20 * tn + (0.025 + 0.004 * X) * math.sin(th * 43.0 + ph)
+            w = dep * mod
+            wr = w * col[i, 0] * math.exp(-KR * X)
+            wg = w * col[i, 1] * math.exp(-KG * X)
+            wb = w * col[i, 2] * math.exp(-KB * X)
+            ix = int(px); iy = int(py)
+            fx = px - ix; fy = py - iy
+            w00 = (1 - fx) * (1 - fy); w10 = fx * (1 - fy); w01 = (1 - fx) * fy; w11 = fx * fy
+            buf[iy, ix, 0] += wr * w00; buf[iy, ix, 1] += wg * w00; buf[iy, ix, 2] += wb * w00
+            buf[iy, ix + 1, 0] += wr * w10; buf[iy, ix + 1, 1] += wg * w10; buf[iy, ix + 1, 2] += wb * w10
+            buf[iy + 1, ix, 0] += wr * w01; buf[iy + 1, ix, 1] += wg * w01; buf[iy + 1, ix, 2] += wb * w01
+            buf[iy + 1, ix + 1, 0] += wr * w11; buf[iy + 1, ix + 1, 1] += wg * w11; buf[iy + 1, ix + 1, 2] += wb * w11
+    return drawn
+
+
+# ----------------------------------------------------------------------------
+# shading the ground and the gompa
+# ----------------------------------------------------------------------------
+AMB = np.array([0.0500, 0.0620, 0.0720])        # what the whole sky gives a flat white card
+KEYD = np.array([0.42, 0.38, 0.82])             # the galaxy's side of the sky, a soft lean of light
+KEYD = KEYD / np.linalg.norm(KEYD)
+HAZE = np.array([0.0080, 0.0125, 0.0135])
+
+
+@njit(**NJ)
+def shade_terrain(x, y, z, t, fpx, B, S, LAMP, seed, near_gompa):
+    lod = t / fpx
+    e = max(0.04, 0.8 * lod)
+    hx = terrain(x + e, y, lod) - terrain(x - e, y, lod)
+    hy = terrain(x, y + e, lod) - terrain(x, y - e, lod)
+    nx = -hx; ny = -hy; nz = 2.0 * e
+    l = 1.0 / math.sqrt(nx * nx + ny * ny + nz * nz)
+    nx *= l; ny *= l; nz *= l
+    # hollows are darker: compare with the ground around
+    ao = 1.0
+    r1 = max(1.2, 4.0 * lod)
+    for q in range(2):
+        rr = r1 * (1.0 if q == 0 else 5.0)
+        hs = (terrain(x + rr, y, lod * 2) + terrain(x - rr, y, lod * 2)
+              + terrain(x, y + rr, lod * 2) + terrain(x, y - rr, lod * 2)) * 0.25
+        oc = (hs - z) / rr
+        if oc > 0.0:
+            ao *= 1.0 - min(0.75, 1.5 * oc)
+        else:
+            ao *= 1.0 + min(0.12, -0.5 * oc)
+    E = (0.42 + 0.58 * (0.5 + 0.5 * nz)) * ao
+    key = max(0.0, (nx * KEYD[0] + ny * KEYD[1] + nz * KEYD[2] + 0.25) / 1.25)
+    E = E * (0.62 + 0.62 * key)
+    if near_gompa:
+        a1, a0 = sky_light(B, S, x + nx * 0.05, y + ny * 0.05, z + nz * 0.05, nx, ny, nz, seed, 10, False)
+        E *= a1 / a0
+    # what it is made of
+    m, m2 = spur_mask(x, y)
+    M = mtn_mask(x, y)
+    k = knoll_mask(x, y)
+    wet, nearw = water_band(x, y)
+    slope = 1.0 - nz
+    big = vnoise2(x * 0.0035 + 2.0, y * 0.0035, 161)
+    mid = vnoise2(x * 0.021, y * 0.021 + 5.0, 162)
+    fine = vnoise2(x * 0.9, y * 0.9, 163) if lod < 0.5 else 0.5
+    # the plain: pale salt and silt, dark turf
+    turf = sstep(0.45, 0.62, 0.6 * big + 0.4 * mid)
+    ar = 0.34 - 0.20 * turf; ag = 0.31 - 0.165 * turf; ab = 0.265 - 0.165 * turf
+    v = 0.82 + 0.26 * mid + 0.16 * (fine - 0.5)
+    ar *= v; ag *= v; ab *= v
+    # marsh grass by the water
+    ar = ar * (1 - 0.72 * nearw); ag = ag * (1 - 0.62 * nearw); ab = ab * (1 - 0.74 * nearw)
+    rockw = max(sstep(0.01, 0.10, m + m2), sstep(0.02, 0.2, k))
+    if rockw > 0.0:
+        st = vnoise2(x * 0.05 + 0.02 * z, z * 0.55, 171)
+        rr_ = 0.20 + 0.10 * st + 0.08 * (fine - 0.5); rg_ = 0.175 + 0.085 * st + 0.08 * (fine - 0.5)
+        rb_ = 0.155 + 0.075 * st + 0.08 * (fine - 0.5)
+        scree = sstep(0.25, 0.05, slope) * 0.06
+        rr_ += scree; rg_ += scree; rb_ += scree
+        ar += (rr_ - ar) * rockw; ag += (rg_ - ag) * rockw; ab += (rb_ - ab) * rockw
+    if M > 0.0:
+        w = sstep(0.0, 0.12, M)
+        st = vnoise2(x * 0.0009, z * 0.012, 181)
+        rr_ = 0.19 + 0.10 * st; rg_ = 0.17 + 0.09 * st; rb_ = 0.16 + 0.085 * st
+        sn = sstep(820.0, 1150.0, z + 260.0 * (vnoise2(x * 0.0006, y * 0.0006, 182) - 0.5)) * sstep(0.42, 0.16, slope)
+        rr_ += (0.80 - rr_) * sn; rg_ += (0.82 - rg_) * sn; rb_ += (0.86 - rb_) * sn
+        ar += (rr_ - ar) * w; ag += (rg_ - ag) * w; ab += (rb_ - ab) * w
+    r = ar * E * AMB[0]; g = ag * E * AMB[1]; b = ab * E * AMB[2]
+    # the lamp
+    lx = LAMP[0] - x; ly = LAMP[1] - y; lz = LAMP[2] - z
+    d2 = lx * lx + ly * ly + lz * lz
+    if d2 < 55.0 * 55.0:
+        d = math.sqrt(d2)
+        lx /= d; ly /= d; lz /= d
+        cs = nx * lx + ny * ly + nz * lz
+        front = lx * LAMP[3] + ly * LAMP[4] + lz * LAMP[5]      # only what the window can see
+        if cs > 0.0 and front < -0.05:
+            if not blocked(B, S, x + nx * 0.08, y + ny * 0.08, z + nz * 0.08, lx, ly, lz, d - 0.2):
+                li = LAMP[6] * cs * (-front) / (d2 + 0.6)
+                r += ar * li * 1.0; g += ag * li * 0.50; b += ab * li * 0.17
+    return r, g, b, wet, nz
+
+
+@njit(**NJ)
+def shade_box(B, S, i, face, x, y, z, LAMP, LIT, seed, nray):
+    """returns linear rgb. LIT: box id, face, bay, storey of the one lit window."""
+    c = B[i, 2]; s = B[i, 3]; a = B[i, 4]; b = B[i, 5]; k = B[i, 8]
+    mat = int(B[i, 9]); storeys = int(B[i, 10]); bid = int(B[i, 11])
+    rx = x - B[i, 0]; ry = y - B[i, 1]
+    lx = rx * c + ry * s; ly = -rx * s + ry * c
+    dtop = B[i, 6] - z
+    inv = 1.0 / math.sqrt(1.0 + k * k)
+    if face == 0:
+        nlx = inv; nly = 0.0; nlz = k * inv; sc = ly; half = b
+    elif face == 1:
+        nlx = -inv; nly = 0.0; nlz = k * inv; sc = -ly; half = b
+    elif face == 2:
+        nlx = 0.0; nly = inv; nlz = k * inv; sc = -lx; half = a
+    elif face == 3:
+        nlx = 0.0; nly = -inv; nlz = k * inv; sc = lx; half = a
+    elif face == 4:
+        nlx = 0.0; nly = 0.0; nlz = 1.0; sc = lx; half = a
+    else:
+        nlx = 0.0; nly = 0.0; nlz = -1.0; sc = lx; half = a
+    nx = nlx * c - nly * s; ny = nlx * s + nly * c; nz = nlz
+    er = 0.0; eg = 0.0; eb = 0.0
+    # material
+    if mat == 0 or mat == 1:
+        if mat == 0:
+            ar = 0.80; ag = 0.79; ab = 0.76
+        else:
+            ar = 0.43; ag = 0.17; ab = 0.11
+        wn = vnoise2(sc * 0.33 + bid * 7.1, dtop * 0.13 + face * 3.3, 201)
+        wn2 = vnoise2(sc * 1.7 + bid * 3.1, dtop * 1.3 + face * 1.3, 203)
+        stk = vnoise2(sc * 2.6 + bid * 1.3, dtop * 0.06, 202)
+        v = 0.76 + 0.20 * wn + 0.08 * wn2
+        v *= 1.0 - 0.26 * stk * stk * sstep(0.9, 2.0, dtop) * sstep(9.0, 2.0, dtop)
+        v *= 1.0 - 0.22 * sstep(storeys * 3.0 + 1.0, storeys * 3.0 + 9.0, dtop)      # the wall below the rooms is older lime
+        ar *= v; ag *= v; ab *= v
+        if mat == 0:
+            # red from the parapet runs down the white
+            run = stk * stk * sstep(3.2, 0.9, dtop) * 0.30
+            ag *= 1.0 - run; ab *= 1.0 - 1.2 * run
+        if face < 4:
+            if dtop < 0.85:
+                ar = 0.215; ag = 0.060; ab = 0.050
+                if dtop > 0.30 and dtop < 0.52 and (sc * 1.25) % 1.0 < 0.30:
+                    ar = 0.62; ag = 0.60; ab = 0.56          # the row of white discs in the band
+            elif dtop < 1.02:
+                ar *= 0.42; ag *= 0.42; ab *= 0.42
+            elif storeys > 0:
+                si = int((dtop - 1.35) / 3.0)
+                if dtop > 1.35 and si < storeys:
+                    wz = (dtop - 1.35) - 3.0 * si
+                    hw = half + k * dtop
+                    nb = int(2.0 * half / 3.4)
+                    if nb < 1:
+                        nb = 1
+                    bw = 2.0 * half / nb
+                    bi = int((sc + half) / bw)
+                    if bi >= 0 and bi < nb:
+                        scc = sc - (-half + (bi + 0.5) * bw)
+                        hh = hash3(bid, face * 16 + bi, si, 211)
+                        lit = (bid == LIT[0] and face == LIT[1] and bi == LIT[2] and si == LIT[3])
+                        pw = 0.80 if si < storeys - 1 else 0.5
+                        if mat == 1:
+                            pw = 0.55
+                        if lit or hh < pw:
+                            sz_ = 1.0 if (si < storeys - 1 or lit) else 0.72
+                            asc = abs(scc)
+                            if wz > 0.28 and wz < 0.50 and asc < 0.80 * sz_:
+                                ar = 0.30; ag = 0.24; ab = 0.18          # lintel: stacked timber ends
+                                if (scc * 5.0) % 1.0 < 0.5:
+                                    ar = 0.55; ag = 0.52; ab = 0.46
+                            elif wz >= 0.50 and wz < 2.02 and asc < (0.56 + 0.14 * (wz - 0.5) / 1.5) * sz_:
+                                ar = 0.030; ag = 0.028; ab = 0.028       # the black surround
+                                if wz > 0.68 and wz < 1.80 and asc < 0.36 * sz_:
+                                    ar = 0.012; ag = 0.012; ab = 0.014
+                                    if lit:
+                                        # butter lamp behind old glass: brighter low, a bar across
+                                        fl = math.exp(-((wz - 1.45) / 0.42) ** 2 - (scc / 0.26) ** 2)
+                                        e0 = 1.6 + 7.0 * fl
+                                        if abs(wz - 1.22) < 0.045 or asc < 0.03:
+                                            e0 *= 0.25
+                                        er = e0 * 1.0; eg = e0 * 0.47; eb = e0 * 0.13
+    elif mat == 2:      # chorten lime
+        v = 0.80 + 0.2 * vnoise2(sc * 1.1 + bid, dtop * 1.1, 221)
+        ar = 0.80 * v; ag = 0.79 * v; ab = 0.76 * v
+    elif mat == 3:      # old timber
+        ar = 0.085; ag = 0.060; ab = 0.045
+        if face < 4:
+            if dtop < 0.34:
+                ar = 0.42; ag = 0.38; ab = 0.33
+                if (sc * 3.0) % 1.0 < 0.5:
+                    ar = 0.16; ag = 0.07; ab = 0.05
+            elif (sc * 0.9 + 0.5) % 1.0 < 0.72 and dtop > 0.7 and dtop < 2.1:
+                ar = 0.016; ag = 0.016; ab = 0.020
+    elif mat == 4:      # gilt
+        ar = 0.62; ag = 0.47; ab = 0.17
+    elif mat == 6:      # red spire
+        ar = 0.30; ag = 0.10; ab = 0.07
+    else:               # dry stone
+        v = 0.7 + 0.5 * vnoise2(sc * 1.5 + bid, dtop * 1.5, 231)
+        ar = 0.21 * v; ag = 0.19 * v; ab = 0.17 * v
+    if face == 4 and mat < 2:
+        ar = 0.20; ag = 0.18; ab = 0.155
+    px = x + nx * 0.03; py = y + ny * 0.03; pz = z + nz * 0.03
+    E, E0 = sky_light(B, S, px, py, pz, nx, ny, nz, seed, nray, True)
+    key = max(0.0, (nx * KEYD[0] + ny * KEYD[1] + nz * KEYD[2] + 0.25) / 1.25)
+    E = E * (0.78 + 0.34 * key)
+    r = ar * E * AMB[0] + er; g = ag * E * AMB[1] + eg; bb = ab * E * AMB[2] + eb
+    lxx = LAMP[0] - px; lyy = LAMP[1] - py; lzz = LAMP[2] - pz
+    d2 = lxx * lxx + lyy * lyy + lzz * lzz
+    if d2 < 55.0 * 55.0 and er == 0.0:
+        d = math.sqrt(d2)
+        lxx /= d; lyy /= d; lzz /= d
+        cs = nx * lxx + ny * lyy + nz * lzz
+        front = lxx * LAMP[3] + lyy * LAMP[4] + lzz * LAMP[5]
+        if cs > 0.0 and front < -0.05:
+            if not blocked(B, S, px, py, pz, lxx, lyy, lzz, d - 0.25):
+                li = LAMP[6] * cs * (-front) / (d2 + 0.6)
+                r += ar * li; g += ag * li * 0.50; bb += ab * li * 0.17
+    # the reveal of the lit window glows a little on its own surround
+    return r, g, bb
+
+
+@njit(**NJ)
+def shade_sphere(B, S, j, x, y, z, LAMP, seed, nray):
+    nx = (x - S[j, 0]) / S[j, 3]; ny = (y - S[j, 1]) / S[j, 3]; nz = (z - S[j, 2]) / S[j, 3]
+    mat = int(S[j, 4])
+    if mat == 2:
+        v = 0.82 + 0.18 * vnoise2(x * 2.0, z * 2.0, 241)
+        ar = 0.80 * v; ag = 0.79 * v; ab = 0.76 * v
+    elif mat == 4:
+        ar = 0.62; ag = 0.47; ab = 0.17
+    else:
+        ar = 0.06; ag = 0.05; ab = 0.045
+    px = x + nx * 0.03; py = y + ny * 0.03; pz = z + nz * 0.03
+    E, E0 = sky_light(B, S, px, py, pz, nx, ny, nz, seed, nray, True)
+    key = max(0.0, (nx * KEYD[0] + ny * KEYD[1] + nz * KEYD[2] + 0.25) / 1.25)
+    E = E * (0.78 + 0.34 * key)
+    return ar * E * AMB[0], ag * E * AMB[1], ab * E * AMB[2]
+
+
+@njit(parallel=True, **NJ)
+def render_ground(Wd, Hd, fpx, cx, cy, CAM, EYE, B, S, BS, LAMP, LIT, ss, ssb, bbox, crop, y_top):
+    col = np.zeros((Hd, Wd, 3), np.float32)
+    alpha = np.zeros((Hd, Wd), np.float32)
+    wat = np.zeros((Hd, Wd, 3), np.float32)      # weight, reflected x, reflected y (weighted)
+    for j in prange(max(y_top, crop[1]), min(Hd, crop[3])):
+        for i in range(crop[0], min(Wd, crop[2])):
+            inb = (i >= bbox[0] and i < bbox[2] and j >= bbox[1] and j < bbox[3])
+            n = ssb if inb else ss
+            cr = 0.0; cg = 0.0; cb = 0.0; ca = 0.0; ww = 0.0; wx = 0.0; wy = 0.0
+            for sj in range(n):
+                for si in range(n):
+                    seed = (j * Wd + i) * 37 + sj * n + si
+                    jx = (si + 0.5 + 0.6 * (hash2(seed, 1, 601) - 0.5)) / n
+                    jy = (sj + 0.5 + 0.6 * (hash2(seed, 2, 602) - 0.5)) / n
+                    X = (i + jx - cx); Y = (cy - (j + jy))
+                    dx = CAM[0, 0] * fpx + CAM[1, 0] * X + CAM[2, 0] * Y
+                    dy = CAM[0, 1] * fpx + CAM[1, 1] * X + CAM[2, 1] * Y
+                    dz = CAM[0, 2] * fpx + CAM[1, 2] * X + CAM[2, 2] * Y
+                    l = 1.0 / math.sqrt(dx * dx + dy * dy + dz * dz)
+                    dx *= l; dy *= l; dz *= l
+                    if dz > 0.30:
+                        continue
+                    # the gompa's bounding sphere
+                    tb = 1e30; kind = -1; idx = -1; face = -1
+                    rx = EYE[0] - BS[0]; ry = EYE[1] - BS[1]; rz = EYE[2] - BS[2]
+                    bq = rx * dx + ry * dy + rz * dz
+                    cq = rx * rx + ry * ry + rz * rz - BS[3] * BS[3]
+                    near = bq * bq - cq > 0.0
+                    if near:
+                        tb, kind, idx, face = scene_hit(B, S, EYE[0], EYE[1], EYE[2], dx, dy, dz)
+                    tt = march(EYE[0], EYE[1], EYE[2], dx, dy, dz, fpx, min(tb, 70000.0))
+                    r = 0.0; g = 0.0; b = 0.0
+                    if tt > 0.0 and tt < tb:
+                        px = EYE[0] + dx * tt; py = EYE[1] + dy * tt; pz = EYE[2] + dz * tt
+                        ddx = px - BS[0]; ddy = py - BS[1]
+                        ng = ddx * ddx + ddy * ddy < 68.0 * 68.0
+                        r, g, b, wet, nz = shade_terrain(px, py, pz, tt, fpx, B, S, LAMP, seed, ng)
+                        t = tt
+                        if wet > 0.0:
+                            cov = min(1.0, wet * 6.0)
+                            fr = 0.02 + 0.98 * (1.0 + dz) ** 5
+                            # still water is nearly black except for what it mirrors
+                            r *= (1 - cov) + cov * 0.25; g *= (1 - cov) + cov * 0.28; b *= (1 - cov) + cov * 0.30
+                            zc = dx * CAM[0, 0] + dy * CAM[0, 1] - dz * CAM[0, 2]
+                            if zc > 0.05:
+                                rpx = cx + fpx * (dx * CAM[1, 0] + dy * CAM[1, 1] - dz * CAM[1, 2]) / zc
+                                rpy = cy - fpx * (dx * CAM[2, 0] + dy * CAM[2, 1] - dz * CAM[2, 2]) / zc
+                                w_ = cov * fr
+                                ww += w_; wx += w_ * rpx; wy += w_ * rpy
+                    elif tb < 1e29:
+                        px = EYE[0] + dx * tb; py = EYE[1] + dy * tb; pz = EYE[2] + dz * tb
+                        if kind == 0:
+                            r, g, b = shade_box(B, S, idx, face, px, py, pz, LAMP, LIT, seed, 14)
+                        else:
+                            r, g, b = shade_sphere(B, S, idx, px, py, pz, LAMP, seed, 14)
+                        t = tb
+                    else:
+                        continue
+                    # air between: far things go toward the low sky
+                    f = math.exp(-t / 52000.0)
+                    r = r * f + HAZE[0] * (1 - f) * 0.9; g = g * f + HAZE[1] * (1 - f) * 0.9; b = b * f + HAZE[2] * (1 - f) * 0.9
+                    cr += r; cg += g; cb += b; ca += 1.0
+            q = 1.0 / (n * n)
+            col[j, i, 0] = cr * q; col[j, i, 1] = cg * q; col[j, i, 2] = cb * q
+            alpha[j, i] = ca * q
+            wat[j, i, 0] = ww * q
+            if ww > 0.0:
+                wat[j, i, 1] = wx / ww; wat[j, i, 2] = wy / ww
+    return col, alpha, wat
+
+
+@njit(parallel=True, **NJ)
+def reflect(img, wat, sgx, sgy, seed):
+    out = np.zeros_like(img)
+    Hd, Wd = wat.shape[0], wat.shape[1]
+    for j in prange(Hd):
+        for i in range(Wd):
+            w = wat[j, i, 0]
+            if w <= 0.0:
+                continue
+            ar = 0.0; ag = 0.0; ab = 0.0; ws = 0.0
+            for k in range(24):
+                # ripples stretch what is mirrored, mostly up and down
+                u1 = hash3(i, j, k, seed); u2 = hash3(i, j, k, seed + 1)
+                rr = math.sqrt(-2.0 * math.log(u1 + 1e-9))
+                ox = rr * math.cos(6.2831853 * u2) * sgx
+                oy = rr * math.sin(6.2831853 * u2) * sgy
+                x = wat[j, i, 1] + ox; y = wat[j, i, 2] + oy
+                if x < 0 or x >= Wd - 1 or y < 0 or y >= Hd - 1:
+                    continue
+                ix = int(x); iy = int(y); fx = x - ix; fy = y - iy
+                for c in range(3):
+                    vv = (img[iy, ix, c] * (1 - fx) + img[iy, ix + 1, c] * fx) * (1 - fy) \
+                        + (img[iy + 1, ix, c] * (1 - fx) + img[iy + 1, ix + 1, c] * fx) * fy
+                    if c == 0:
+                        ar += vv
+                    elif c == 1:
+                        ag += vv
+                    else:
+                        ab += vv
+                ws += 1.0
+            if ws > 0.0:
+                out[j, i, 0] = w * 0.80 * ar / ws
+                out[j, i, 1] = w * 0.84 * ag / ws
+                out[j, i, 2] = w * 0.86 * ab / ws
+    return out
+
+
+# ----------------------------------------------------------------------------
+# building the gompa
+# ----------------------------------------------------------------------------
+
+def spur_world(u, v):
+    return SPX + u * SP_C - v * SP_S, SPY + u * SP_S + v * SP_C
+
+
+def build_gompa(rng):
+    B = []; S = []
+    ids = [0]
+
+    def box(u, v, a, b, storeys, k=0.075, mat=0, rot=0.0, ztop=None, zbot=None, lift=0.0):
+        x, y = spur_world(u, v)
+        th = SP_TH + math.radians(rot)
+        c, s = math.cos(th), math.sin(th)
+        hs = []
+        for du in (-a, 0, a):
+            for dv in (-b, 0, b):
+                hs.append(terrain(x + du * c - dv * s, y + du * s + dv * c, 0.2))
+        g = terrain(x, y, 0.2)
+        if ztop is None:
+            ztop = max(g, 0.5 * (g + max(hs))) + 3.0 * storeys + 1.35 + lift
+        if zbot is None:
+            zbot = min(hs) - 2.0
+        ids[0] += 1
+        B.append([x, y, c, s, a, b, ztop, zbot, k, mat, storeys, ids[0]])
+        return len(B) - 1
+
+    # the dukhang, red above, and its lantern
+    main = box(0, 3, 9.0, 7.0, 4, mat=1, k=0.06)
+    mt = B[main][6]
+    box(-0.5, 4.0, 4.6, 3.8, 1, mat=1, k=0.05, ztop=mt + 3.9, zbot=mt - 0.5)
+    lt = mt + 3.9
+    # gilt finial on the lantern, and two at the dukhang's front corners
+    x, y = spur_world(-0.5, 4.0)
+    box(-0.5, 4.0, 0.16, 0.16, 0, mat=4, k=0.16, ztop=lt + 1.5, zbot=lt)
+    S.append([x, y, lt + 0.55, 0.36, 4])
+    for uu in (-7.6, 7.6):
+        box(uu, -2.6, 0.13, 0.13, 0, mat=4, k=0.10, ztop=mt + 1.2, zbot=mt)
+    # the rabsal: timber balcony window high on the front
+    box(0.0, 3 - 7.0 - 0.35, 3.9, 0.75, 0, mat=3, k=0.0, ztop=mt - 2.1, zbot=mt - 4.7)
+    # white ranges along the crest
+    box(-17.5, 1.5, 8.0, 6.0, 3, rot=3)
+    box(-31.5, -0.5, 6.4, 5.0, 2, rot=-4)
+    box(-42.5, -3.0, 4.8, 4.0, 2, rot=5)
+    box(16.5, 0.5, 7.2, 6.0, 3, rot=-3)
+    box(29.5, -1.5, 6.2, 5.2, 3, rot=4, lift=-1.0)
+    box(41.0, -4.0, 5.2, 4.4, 2, rot=-6)
+    box(51.5, -6.0, 3.8, 3.4, 1, rot=7)
+    # cells stepping down the face toward the eye
+    box(-9.0, -12.5, 7.0, 4.4, 2, rot=-2)
+    lit = box(8.5, -14.0, 6.2, 4.2, 2, rot=3)
+    box(22.5, -13.0, 5.0, 4.0, 2, rot=-5)
+    box(-24.5, -11.5, 5.6, 4.0, 2, rot=6)
+    box(1.0, -23.5, 5.2, 3.6, 2, rot=-3)
+    box(-14.5, -22.5, 4.4, 3.4, 1, rot=4)
+    box(15.5, -24.0, 4.2, 3.2, 1, rot=-7)
+    box(-36.5, -12.0, 3.8, 3.2, 1, rot=-8)
+    box(33.5, -13.5, 3.6, 3.0, 1, rot=9)
+    # dry-stone revetment under the lowest cells
+    # flag masts
+    for (uu, vv, hh) in ((-12.0, -5.5, 9.0), (25.0, -7.0, 6.5), (-46.5, -6.5, 5.0)):
+        x, y = spur_world(uu, vv)
+        g = terrain(x, y, 0.2)
+        box(uu, vv, 0.075, 0.075, 0, mat=3, k=0.0, ztop=g + hh + 4.0, zbot=g - 1)
+        S.append([x, y, g + hh + 4.1, 0.2, 3])
+    # chortens on the shoulder
+    for (uu, vv, sc) in ((84.0, -9.0, 1.25), (95.0, -10.0, 1.0), (104.5, -10.5, 0.85), (-64.0, -6.0, 1.0)):
+        x, y = spur_world(uu, vv)
+        g = max(terrain(x, y, 0.2), terrain(x + 2, y, 0.2), terrain(x - 2, y, 0.2), terrain(x, y - 2, 0.2))
+        z = g - 0.3
+        for (a_, h_) in ((2.3, 1.1), (1.8, 0.8), (1.35, 0.7)):
+            box(uu, vv, a_ * sc, a_ * sc, 0, mat=2, k=0.03, ztop=z + h_ * sc, zbot=z - (3.0 if a_ > 2 else 0.0))
+            z += h_ * sc
+        S.append([x, y, z + 0.95 * sc, 1.28 * sc, 2])
+        z += 2.0 * sc
+        box(uu, vv, 0.5 * sc, 0.5 * sc, 0, mat=2, k=0.0, ztop=z + 0.5 * sc, zbot=z - 0.3)
+        z += 0.5 * sc
+        box(uu, vv, 0.05 * sc, 0.05 * sc, 0, mat=6, k=0.14, ztop=z + 2.3 * sc, zbot=z)
+        S.append([x, y, z + 2.3 * sc, 0.13 * sc, 4])
+    B = np.array(B, np.float64); S = np.array(S, np.float64)
+    # the lit window: storey 1 (lower), a bay right of centre, on the face that looks at the eye
+    i = lit
+    c, s, a, b, k = B[i, 2], B[i, 3], B[i, 4], B[i, 5], B[i, 8]
+    nb = max(1, int(2 * a / 3.4)); bw = 2 * a / nb
+    bay = min(nb - 1, 2); st = 1
+    sc_ = -a + (bay + 0.5) * bw
+    dtop = 1.35 + 3.0 * st + 1.3
+    ly = -(b + k * dtop) - 0.45
+    wx = B[i, 0] + sc_ * c - ly * s
+    wy = B[i, 1] + sc_ * s + ly * c
+    wz = B[i, 6] - dtop
+    nrm = (s, -c, 0.0)        # outward: box -y
+    LAMP = np.array([wx, wy, wz, -nrm[0], -nrm[1], -nrm[2], 4.0], np.float64)
+    # LAMP[3:6] is the direction pointing back into the window (light travels along -that)
+    LIT = np.array([int(B[i, 11]), 3, bay, st], np.int64)
+    return B, S, LAMP, LIT
+
+
+# ----------------------------------------------------------------------------
+# stars
+# ----------------------------------------------------------------------------
+
+def blackbody(T):
+    lam = np.array([0.610, 0.550, 0.465])
+    def pl(t):
+        return 1.0 / (lam ** 5 * (np.exp(14388.0 / (lam * t)) - 1.0))
+    c = pl(np.asarray(T)[:, None]) / pl(np.array([[6300.0]]))
+    lum = c @ np.array([0.25, 0.65, 0.10])
+    c = c / lum[:, None]
+    return c
+
+
+def rot_about(v, p, th):
+    """rotate v about unit p by +th (right-handed)"""
+    return v * math.cos(th) + np.cross(p, v) * math.sin(th) + p * np.dot(p, v) * (1 - math.cos(th))
+
+
+def make_stars(rng, P, G):
+    NTRY = 725_000
+    zmin = math.sin(math.radians(22.0))
+    z = rng.uniform(zmin, 1.0, NTRY)
+    ph = rng.uniform(0, 2 * np.pi, NTRY)
+    e1 = np.array([1.0, 0.0, 0.0])
+    e2 = np.cross(P, e1)
+    rr = np.sqrt(1 - z * z)
+    V = z[:, None] * P[None, :] + rr[:, None] * (np.cos(ph)[:, None] * e1[None, :] + np.sin(ph)[:, None] * e2[None, :])
+    # magnitudes: slope 0.50 to m=7, 0.42 beyond, to 11.0
+    u = rng.uniform(0, 1, NTRY)
+    a1, a2, m0, mb, m1 = 0.50, 0.42, -1.2, 7.0, 11.0
+    n1 = 10 ** (a1 * mb) - 10 ** (a1 * m0)
+    dens_b = a1 * 10 ** (a1 * mb)
+    n2 = dens_b / a2 * (10 ** (a2 * (m1 - mb)) - 1.0)
+    pick = rng.uniform(0, 1, NTRY) < n1 / (n1 + n2)
+    mag = np.where(pick,
+                   np.log10(u * n1 + 10 ** (a1 * m0)) / a1,
+                   mb + np.log10(1.0 + u * (10 ** (a2 * (m1 - mb)) - 1.0)) / a2)
+    keep = star_accept(V, mag, G, rng.uniform(0, 1, NTRY))
+    V = V[keep]; mag = mag[keep]
+    n = len(mag)
+    # temperatures: faint stars run cooler
+    u = rng.uniform(0, 1, n)
+    hot = 0.30 - 0.012 * np.clip(mag - 4, 0, 8)
+    cool = 0.36 + 0.015 * np.clip(mag - 4, 0, 8)
+    T = np.where(u < hot, 7500 * (2.6 ** (rng.uniform(0, 1, n) ** 1.8)),
+                 np.where(u < 1 - cool, rng.uniform(5200, 7500, n), rng.uniform(3300, 5200, n)))
+    col = blackbody(T)
+    return V, mag, col
+
+
+# ----------------------------------------------------------------------------
+# the mark: an eight-pointed star drawn with a compass, and the altitude
+# ----------------------------------------------------------------------------
+
+def _seg(acc, x0, y0, x1, y1, wd):
+    Hh, Ww = acc.shape
+    xa = int(max(0, min(x0, x1) - wd - 2)); xb = int(min(Ww, max(x0, x1) + wd + 3))
+    ya = int(max(0, min(y0, y1) - wd - 2)); yb = int(min(Hh, max(y0, y1) + wd + 3))
+    if xb <= xa or yb <= ya:
+        return
+    yy, xx = np.mgrid[ya:yb, xa:xb].astype(np.float64)
+    dx, dy = x1 - x0, y1 - y0
+    L2 = dx * dx + dy * dy + 1e-9
+    t = np.clip(((xx - x0) * dx + (yy - y0) * dy) / L2, 0, 1)
+    d = np.hypot(xx - x0 - t * dx, yy - y0 - t * dy)
+    acc[ya:yb, xa:xb] = np.maximum(acc[ya:yb, xa:xb], np.clip(wd * 0.5 + 0.5 - d, 0, 1))
+
+
+def signature(img, s):
+    Hh, Ww = img.shape[:2]
+    acc = np.zeros((Hh, Ww)); faint = np.zeros((Hh, Ww))
+    cx, cy, R = 150 * s, Hh - 118 * s, 30 * s
+    wd = max(1.0, 1.5 * s)
+    pts = [(cx + R * math.sin(k * math.pi / 4), cy - R * math.cos(k * math.pi / 4)) for k in range(8)]
+    for k in range(8):                       # {8/3}: each point joined to the third along
+        a = pts[k]; b = pts[(k + 3) % 8]
+        _seg(acc, a[0], a[1], b[0], b[1], wd)
+    n = 72                                   # the compass circle, left in
+    for k in range(n):
+        a0 = 2 * math.pi * k / n; a1 = 2 * math.pi * (k + 1) / n
+        _seg(faint, cx + R * math.cos(a0), cy + R * math.sin(a0), cx + R * math.cos(a1), cy + R * math.sin(a1), wd * 0.8)
+    _seg(acc, cx - 0.4, cy, cx + 0.4, cy, wd * 1.6)          # the compass prick
+    # 4500 m in single strokes
+    G_ = {
+        '4': [((0.72, 1.0), (0.72, 0.0)), ((0.72, 0.0), (0.0, 0.66)), ((0.0, 0.66), (1.0, 0.66))],
+        '5': [((0.92, 0.0), (0.12, 0.0)), ((0.12, 0.0), (0.06, 0.44)), ((0.06, 0.44), (0.55, 0.38)),
+              ((0.55, 0.38), (0.92, 0.55)), ((0.92, 0.55), (0.92, 0.82)), ((0.92, 0.82), (0.58, 1.0)),
+              ((0.58, 1.0), (0.05, 0.92))],
+        '0': [((0.5, 0.0), (0.12, 0.2)), ((0.12, 0.2), (0.05, 0.5)), ((0.05, 0.5), (0.12, 0.8)), ((0.12, 0.8), (0.5, 1.0)),
+              ((0.5, 1.0), (0.88, 0.8)), ((0.88, 0.8), (0.95, 0.5)), ((0.95, 0.5), (0.88, 0.2)), ((0.88, 0.2), (0.5, 0.0))],
+        'm': [((0.0, 1.0), (0.0, 0.42)), ((0.0, 0.52), (0.25, 0.40)), ((0.25, 0.40), (0.5, 0.52)), ((0.5, 0.52), (0.5, 1.0)),
+              ((0.5, 0.52), (0.75, 0.40)), ((0.75, 0.40), (1.0, 0.52)), ((1.0, 0.52), (1.0, 1.0))],
+    }
+    hgt = 24 * s; wdt = 14 * s
+    x = cx + R + 22 * s; y = cy - hgt * 0.5 + 2 * s
+    for ch in "4500 m":
+        if ch == ' ':
+            x += wdt * 0.6
+            continue
+        ww = wdt * (1.25 if ch == 'm' else 1.0)
+        for (p, q) in G_[ch]:
+            _seg(acc, x + p[0] * ww, y + p[1] * hgt, x + q[0] * ww, y + q[1] * hgt, wd)
+        x += ww + 7 * s
+    a = np.clip(0.50 * acc + 0.20 * faint, 0, 1)[..., None]
+    ink = np.array([0.74, 0.76, 0.72])[None, None, :]
+    return img * (1 - a) + ink * a
+
+
+# ----------------------------------------------------------------------------
+# main
+# ----------------------------------------------------------------------------
+
+def main():
+    t0 = time.time()
+    rng = np.random.default_rng(SEED)
+    here = os.path.dirname(os.path.abspath(__file__))
+    stem = os.path.splitext(os.path.basename(__file__))[0]
+    out = os.path.join(here, stem + ".png")
+    crop_env = os.environ.get("HANLE_CROP")
+    if SCALE != 1.0 or crop_env:
+        out = os.environ.get("HANLE_OUT", os.path.join(here, stem + "_draft.png"))
+
+    # camera
+    fwd = np.array([math.sin(YAW) * math.cos(PITCH), math.cos(YAW) * math.cos(PITCH), math.sin(PITCH)])
+    right = np.array([math.cos(YAW), -math.sin(YAW), 0.0])
+    up = np.cross(right, fwd)
+    CAM = np.stack([fwd, right, up])
+    P = np.array([0.0, math.cos(LAT), math.sin(LAT)])
+    EYE = np.array([0.0, 0.0, terrain(0.0, 0.0, 0.05) + 1.7])
+
+    def project(v):
+        zc = v @ fwd
+        return CX + FPX * (v @ right) / zc, CY - FPX * (v @ up) / zc
+
+    # the galaxy's frame, set so that at mid-exposure the band stands on the right
+    # horizon and leans up across the top; its nearest point is 27 deg from the pole
+    zen = np.array([0.0, 0.0, 1.0])
+    upt = zen - (zen @ P) * P; upt /= np.linalg.norm(upt)
+    est = np.array([1.0, 0.0, 0.0])
+    PA = math.radians(52.0)
+    side = math.cos(PA) * upt + math.sin(PA) * est
+    q_mid = math.cos(math.radians(27.0)) * P + math.sin(math.radians(27.0)) * side
+    gp_mid = math.cos(math.radians(63.0)) * P - math.sin(math.radians(63.0)) * side
+    # trails use v(th) = rot(P, -th) v0, so v0 = rot(P, +th_mid) v_mid
+    q0 = rot_about(q_mid, P, THETA / 2); gp0 = rot_about(gp_mid, P, THETA / 2)
+    G = np.stack([gp0, q0, np.cross(gp0, q0)])
+
+    V, mag, col = make_stars(rng, P, G)
+    # the pole star: 0.72 deg off the pole, second magnitude, yellow-white
+    pa = math.radians(205.0)
+    pol = math.cos(math.radians(0.72)) * P + math.sin(math.radians(0.72)) * (math.cos(pa) * upt + math.sin(pa) * est)
+    # the last point of light
+    lx_ = 7.0
+    bx_ = math.radians(rope_b(lx_))
+    ll = math.radians(lx_)
+    extra = math.cos(bx_) * (math.cos(ll) * G[1] + math.sin(ll) * G[2]) + math.sin(bx_) * G[0]
+    V = np.vstack([V, pol[None, :], extra[None, :]])
+    mag = np.concatenate([mag, [2.0, 4.1]])
+    col = np.vstack([col, blackbody(np.array([6000.0, 4300.0]))])
+    # hold the colour back: what a dark-adapted eye believes
+    col = 0.30 + 0.70 * col
+    flux = 10 ** (-0.4 * mag)
+    em = rot_about(extra, P, -THETA / 2)
+    print("stars %d, m<6.5: %d; extra star mid-arc at full-size pixel (%.0f, %.0f); pole at (%.0f, %.0f)" % (
+        len(mag), (mag < 6.5).sum(), project(em)[0] / SCALE, project(em)[1] / SCALE,
+        project(P)[0] / SCALE, project(P)[1] / SCALE), flush=True)
+
+    # trails
+    sig = max(0.55, 0.85 * SCALE)
+    buf = np.zeros((H, W, 3), np.float32)
+    kdep = 6.2 * FPX * (sig / 0.85)
+    nd = draw_trails(buf, V.astype(np.float64), flux, col, P, CAM, FPX, CX, CY, THETA, 0.33, kdep)
+    stars = np.empty_like(buf)
+    for c in range(3):
+        stars[..., c] = gaussian_filter(buf[..., c], sig)
+    del buf
+    print("trails drawn %d  %.0fs" % (nd, time.time() - t0), flush=True)
+
+    # sky
+    step = 3 if SCALE >= 0.9 else 2
+    Wd, Hd = W // step + 2, H // step + 2
+    bg_s, gl_s = render_sky(Wd, Hd, float(step), FPX, CX, CY, CAM, P, G, THETA, 36)
+
+    def upsample(a):
+        im = Image.fromarray(a.astype(np.float32), 'F').resize((Wd * step, Hd * step), Image.BICUBIC)
+        # coarse sample k sits at pixel k*step; PIL centres samples, so shift by half a coarse cell
+        arr = np.asarray(im)
+        o = step // 2
+        return arr[o:o + H, o:o + W]
+    sky = np.stack([upsample(bg_s[..., c]) for c in range(3)], -1)
+    glow = upsample(gl_s)
+    sky = sky + glow[..., None] * np.array([0.0082, 0.0078, 0.0074], np.float32)[None, None, :]
+    lin = sky + stars
+    del stars
+    print("sky %.0fs" % (time.time() - t0), flush=True)
+
+    # ground
+    B, S, LAMP, LIT = build_gompa(rng)
+    bc = np.array([spur_world(4.0, -8.0)[0], spur_world(4.0, -8.0)[1], terrain(SPX, SPY, 0.2) - 4.0])
+    BS = np.array([bc[0], bc[1], bc[2], 125.0])
+    # screen box of the gompa for heavier sampling
+    xs, ys = [], []
+    for i in range(B.shape[0]):
+        for zz in (B[i, 6], B[i, 7]):
+            for sx_ in (-1, 1):
+                for sy_ in (-1, 1):
+                    r_ = B[i, 4] + 2.0; r2_ = B[i, 5] + 2.0
+                    wxp = B[i, 0] + sx_ * r_ * B[i, 2] - sy_ * r2_ * B[i, 3]
+                    wyp = B[i, 1] + sx_ * r_ * B[i, 3] + sy_ * r2_ * B[i, 2]
+                    p = project(np.array([wxp, wyp, zz + 1.0]) - EYE)
+                    xs.append(p[0]); ys.append(p[1])
+    bbox = np.array([int(min(xs)) - 4, int(min(ys)) - 8, int(max(xs)) + 4, int(max(ys)) + 4], np.int64)
+    if crop_env:
+        cr = np.array([int(float(v) * SCALE) for v in crop_env.split(",")], np.int64)
+    else:
+        cr = np.array([0, 0, W, H], np.int64)
+    y_top = min(int(bbox[1]) - 2, int(CY + FPX * math.tan(PITCH - math.radians(9.5))))
+    ss = 2 if SCALE >= 0.9 else 2
+    ssb = 4 if SCALE >= 0.9 else 3
+    if os.environ.get("HANLE_NOGROUND"):
+        cr = np.array([0, 0, 1, 1], np.int64)
+    gcol, galpha, wat = render_ground(W, H, FPX, CX, CY, CAM, EYE, B, S, BS, LAMP, LIT, ss, ssb, bbox, cr, y_top)
+    print("ground %.0fs  gompa box %s" % (time.time() - t0, bbox / SCALE), flush=True)
+    lp = project(LAMP[:3] - EYE)
+    print("lamp at full-size pixel (%.0f, %.0f)" % (lp[0] / SCALE, lp[1] / SCALE), flush=True)
+
+    lin = lin * (1.0 - galpha[..., None]) + gcol
+    lin = lin + reflect(lin, wat, 2.2 * SCALE, 13.0 * SCALE, 7001)
+
+    # the lens: a little veiling glare round anything bright, and falloff to the corners
+    halo = np.zeros_like(lin)
+    for (sg, wgt) in ((2.4, 0.034), (8.0, 0.012), (28.0, 0.005)):
+        for c in range(3):
+            halo[..., c] += wgt * gaussian_filter(lin[..., c], sg * SCALE)
+    lin = lin * (1 - 0.051) + halo
+    del halo
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    r2 = ((xx - CX) ** 2 + (yy - CY) ** 2) / (FPX * FPX)
+    cos2 = 1.0 / (1.0 + r2)
+    vig = 0.68 + 0.32 * cos2 ** 1.25
+    lin *= vig[..., None]
+    del xx, yy, r2, cos2
+
+    # exposure like a long photograph, then held back
+    x = lin * 1.0
+    img = 1.0 - np.exp(-x * 1.05)
+    img = np.clip(img, 0, 1) ** (1 / 2.2)
+    lum = img @ np.array([0.25, 0.65, 0.10], np.float32)
+    img = lum[..., None] + (img - lum[..., None]) * 0.90
+    # a very fine grain; the dark is full of something
+    g1 = gaussian_filter(rng.normal(0, 1, (H, W)).astype(np.float32), 0.55)
+    g1 /= g1.std()
+    g3 = rng.normal(0, 1, (H, W, 3)).astype(np.float32)
+    amp = 0.0085 + 0.010 * np.sqrt(np.clip(lum, 0, 1)) * (1 - lum)
+    img = img + amp[..., None] * (g1[..., None] + 0.35 * g3)
+    img = np.clip(img, 0, 1)
+    img = signature(img, SCALE)
+    img = np.clip(img + (rng.uniform(0, 1, img.shape) - 0.5) / 255.0, 0, 1)
+    arr = (img * 255.0 + 0.5).astype(np.uint8)
+    if crop_env:
+        cr = np.array([int(float(v) * SCALE) for v in crop_env.split(",")], np.int64)
+        arr = arr[cr[1]:cr[3], cr[0]:cr[2]]
+    Image.fromarray(arr).save(out)
+    print("wrote %s  %dx%d  %.0fs" % (out, arr.shape[1], arr.shape[0], time.time() - t0), flush=True)
+
+
+if __name__ == "__main__":
+    main()

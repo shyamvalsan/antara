@@ -1,0 +1,1244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Code: Escalera 3, marea alta | Antara</title>
+<meta name="description" content="The program that computes Escalera 3, marea alta by Halina Mróz Quispe.">
+<meta property="og:title" content="Code: Escalera 3, marea alta | Antara">
+<meta property="og:description" content="The program that computes Escalera 3, marea alta by Halina Mróz Quispe.">
+
+<meta name="theme-color" content="#0E0E0D">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Marcellus&family=Albert+Sans:ital,wght@0,300;0,400;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../style.css">
+<link rel="icon" href="../../mark.svg" type="image/svg+xml">
+</head>
+<body class="plain">
+<header class="top">
+  <a class="mark" href="../../">Antara</a>
+  <nav><a href="../../">Walk the gallery</a><a href="../../works/">All works</a><a href="../../about/">About</a></nav>
+</header>
+<main>
+<section class="lead"><h1>Escalera 3, marea alta</h1>
+<p class="dates">Halina Mróz Quispe. The whole program that computes this picture: 1,213 lines of Python.</p>
+<p><a href="../../works/#escalera-3-marea-alta">Back to the work</a>. <a href="escalera_3_marea_alta.py" download>Download the .py file</a></p></section>
+<pre class="src">&quot;&quot;&quot;
+Escalera 3, marea alta
+
+H. Mroz Quispe.  Picture no. 3.
+
+Declaration.  Service stair no. 3, port side, seen from the half-landing.  Well 3.90 m wide, a spine
+wall 0.16 m between two flights of fourteen risers, 0.17 m by 0.29 m.  The left flight goes down to
+the boat landing, which is 2.38 m below the lens floor and at this hour under 1.38 m of water.  The
+right flight goes up to the offices.  Board-marked concrete, sea-green gloss dado at 1.05 m following
+the pitch.  One sodium well-glass on the left wall over the lower landing; two fluorescent battens,
+neither in the frame.  Tide staff, life ring, a 100 mm downpipe, a handrail each side, a cup.
+Plumb line from a pin in the back wall, 0.08 m off it, 0.65 m from the left corner.
+Everything is in order.  Please check again.
+
+Usage:  python escalera_3_marea_alta.py [scale=1.0] [out.png] [supersampling]
+        scale 0.5 is a study; 1.0 is 2400 x 3000.
+
+Built as signed-distance solids in metres, lit by calculation:
+  lamps  - the sodium glass as a sphere, the battens as lines, sampled; penumbra widens with distance
+  bounce - what the lamps light becomes small lamps (and each of those sends one more), with shadows
+  water  - a plane; Fresnel mirror above, turbid below, the steps seen through it by refraction
+  gloss  - jittered reflection rays on gloss paint, wet concrete, enamel, brass
+  lens   - level camera with front fall, falloff about the lens axis, fine grain
+&quot;&quot;&quot;
+import sys, math, time, warnings
+import numpy as np
+from numba import njit, prange
+from numba.core.errors import NumbaWarning
+warnings.simplefilter(&#x27;ignore&#x27;, NumbaWarning)       # the lettering is a table in memory; numba will not keep what reads it, and says so
+from PIL import Image, ImageDraw, ImageFont
+from scipy.ndimage import gaussian_filter
+
+CONTAINER = 2834175                 # the first manifest
+SEED = CONTAINER + 3                # plus the picture&#x27;s number
+
+# ------------------------------------------------------------------ the notebook (metres)
+XL, XR = -2.20, 1.70                               # left wall, right wall
+SP = 0.08                                          # half the spine wall
+ZF, ZS, ZE, ZB = -1.60, 2.00, 6.06, 7.60           # wall behind the lens, first riser, last riser, back wall
+RI, TR, NST = 0.17, 0.29, 14                       # riser, tread, risers in a flight
+PITCH = RI / TR
+CP = 1.0 / math.sqrt(1.0 + PITCH * PITCH)
+YB, YU, YT = -NST * RI, NST * RI, 4.56             # boat landing, office landing, ceiling
+SLAB = 0.20
+ARR = 0.005                                        # the arrises were rubbed off the steps
+XC, YC, ZC = (XL + XR) * 0.5, (YB + YT) * 0.5, (ZF + ZB) * 0.5
+XH, YH, ZH = (XR - XL) * 0.5, (YT - YB) * 0.5, (ZB - ZF) * 0.5
+DADO = 1.05
+CAMX, CAMY = -0.50, 1.55
+TU, VTOP, VBOT = 0.50, 0.27, -0.98                 # tangent half-width; rise of the frame above / below the axis
+
+# ---- the water.
+# THE ITEM: this water is at rest and it is not level.  Its surface stands two degrees out of true,
+# high against the left wall.  Every other surface, line, shadow and reflection in this file is
+# computed from the same vertical the plumb line hangs by.
+TILT = math.radians(2.0)
+WX0, WY0 = -1.14, -1.00                            # where the surface is measured: mid-bay, 1.38 m over the boat landing
+WNX, WNY = math.sin(TILT), math.cos(TILT)          # its normal.  (A level surface would have 0, 1.)
+HWL = -0.905                                       # the mark the high tides have left on the concrete.  It is level.
+SIG_R, SIG_G, SIG_B = 1.7, 1.0, 1.25               # harbour water: extinction per metre
+
+# ---- lamps
+L0X, L0Y, L0Z, L0R = XL + 0.16, 0.34, 6.85, 0.060  # sodium well-glass
+I0R, I0G, I0B = 1.00, 0.50, 0.13                   # its intensity
+L1X, L1Y, L1Z = -0.45, YT - 0.06, -0.35            # batten over the half-landing, behind the lens
+I1 = 0.70
+L2X, L2Y, L2Z = 0.90, YT - 0.06, 6.80              # batten over the office landing
+I2 = 1.6
+TLEN = 1.20
+ITR, ITG, ITB = 0.66, 1.00, 0.88                   # cool white, as film sees it
+LGR, LGG, LGB = I0R / (math.pi * L0R ** 2), I0G / (math.pi * L0R ** 2), I0B / (math.pi * L0R ** 2)
+
+# ---- things
+RXL, RXR, RAH, RR = XL + 0.075, XR - 0.075, 0.92, 0.021        # handrails
+STX, ST0, ST1, STZERO = -1.90, YB + 0.05, 0.62, YB - 0.50      # tide staff: centre, foot, head, its zero
+PLX, PLZ, PLTOP, PLBOT, PLR = -1.55, ZB - 0.08, 2.02, -0.80, 0.0017   # plumb line
+DPX, DPZ = -0.17, ZB - 0.078                                   # downpipe
+BYC, BZC, BRA, BRI = 0.52, 4.35, 0.29, 0.052                   # life ring on the left wall
+MX, MZ = -0.98, 1.90                                           # the cup
+SGX0, SGX1, SGY0, SGY1 = -1.28, -0.36, 1.27, 1.42              # ESCALERA 3
+GUX, GUZ = -0.06, 1.70                                         # floor gully
+
+M_CONC, M_RAIL, M_GALV, M_HOUS, M_GLASS, M_WIRE, M_STAFF, M_BUOY, M_MUG = 2, 4, 5, 6, 7, 8, 9, 10, 12
+M_CORD, M_BRASS, M_NAIL, M_PIPE, M_WATER = 13, 14, 15, 16, 20
+NJ = dict(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+
+
+# ------------------------------------------------------------------ lettering, cut as stencils
+def _stencil(text, px, cut=True):
+    font = ImageFont.truetype(&#x27;/usr/share/fonts/opentype/urw-base35/NimbusSansNarrow-Bold.otf&#x27;, px)
+    w = int(font.getlength(text)) + 16
+    im = Image.new(&#x27;L&#x27;, (w, int(px * 1.4)), 0); d = ImageDraw.Draw(im)
+    d.text((8, int(px * 0.1)), text, fill=255, font=font)
+    if cut:
+        for i, ch in enumerate(text):                                   # the bridges that hold a stencil together
+            if ch == &#x27; &#x27;: continue
+            a = 8 + font.getlength(text[:i]); b = 8 + font.getlength(text[:i + 1])
+            c = int(round((a + b) * 0.5)); g = max(int(px * 0.035), 1)
+            d.rectangle([c - g, 0, c + g, im.height], fill=0)
+    a = np.asarray(im, np.float32) / 255.0
+    ys = np.where(a.max(1) &gt; 0.5)[0]; xs = np.where(a.max(0) &gt; 0.5)[0]
+    a = a[ys[0]:ys[-1] + 1, xs[0]:xs[-1] + 1]
+    return np.ascontiguousarray(gaussian_filter(a, px * 0.007))
+
+TEX_SIGN = _stencil(&#x27;ESCALERA 3&#x27;, 300)
+TEX_3 = _stencil(&#x27;3&#x27;, 560)
+def _digits():
+    out = np.zeros((72, 48 * 10), np.float32)
+    for k in range(10):
+        g = _stencil(str(k), 80, False)
+        im = Image.fromarray((g * 255).astype(np.uint8)).resize((36, 62), Image.LANCZOS)
+        out[5:67, k * 48 + 6:k * 48 + 42] = np.asarray(im, np.float32) / 255.0
+    return out
+TEX_DIG = _digits()
+SGH = (SGX1 - SGX0) * TEX_SIGN.shape[0] / TEX_SIGN.shape[1]            # height of the lettering on the wall
+
+
+# ------------------------------------------------------------------ small tools
+@njit(**NJ)
+def hash3(i, j, k):
+    n = (i * 374761393 + j * 668265263 + k * 1274126177) &amp; 0x7fffffff
+    n = ((n ^ (n &gt;&gt; 13)) * 1274126177) &amp; 0x7fffffff
+    return ((n ^ (n &gt;&gt; 16)) &amp; 0xffffff) / 16777216.0
+
+@njit(**NJ)
+def noise3(x, y, z):
+    i = math.floor(x); j = math.floor(y); k = math.floor(z)
+    u = x - i; v = y - j; w = z - k
+    u = u * u * (3 - 2 * u); v = v * v * (3 - 2 * v); w = w * w * (3 - 2 * w)
+    i = int(i); j = int(j); k = int(k)
+    a = hash3(i, j, k) + u * (hash3(i + 1, j, k) - hash3(i, j, k))
+    b = hash3(i, j + 1, k) + u * (hash3(i + 1, j + 1, k) - hash3(i, j + 1, k))
+    c = hash3(i, j, k + 1) + u * (hash3(i + 1, j, k + 1) - hash3(i, j, k + 1))
+    d = hash3(i, j + 1, k + 1) + u * (hash3(i + 1, j + 1, k + 1) - hash3(i, j + 1, k + 1))
+    e = a + v * (b - a); f = c + v * (d - c)
+    return e + w * (f - e)
+
+@njit(**NJ)
+def fbm3(x, y, z, o):
+    s = 0.0; a = 0.5; t = 0.0
+    for i in range(o):
+        s += a * noise3(x, y, z); t += a; a *= 0.5
+        x = x * 2.03 + 11.3; y = y * 2.03 + 5.7; z = z * 2.03 + 3.1
+    return s / t
+
+@njit(**NJ)
+def sstep(a, b, x):
+    t = (x - a) / (b - a)
+    if t &lt; 0: t = 0.0
+    if t &gt; 1: t = 1.0
+    return t * t * (3 - 2 * t)
+
+@njit(**NJ)
+def sd_box(x, y, z, bx, by, bz):
+    qx = abs(x) - bx; qy = abs(y) - by; qz = abs(z) - bz
+    ox = max(qx, 0.0); oy = max(qy, 0.0); oz = max(qz, 0.0)
+    return math.sqrt(ox * ox + oy * oy + oz * oz) + min(max(qx, max(qy, qz)), 0.0)
+
+@njit(**NJ)
+def sd_box2(a, b, ha, hb):
+    qa = abs(a) - ha; qb = abs(b) - hb
+    oa = max(qa, 0.0); ob = max(qb, 0.0)
+    return math.sqrt(oa * oa + ob * ob) + min(max(qa, qb), 0.0)
+
+@njit(**NJ)
+def quad(a, b):
+    &quot;&quot;&quot;distance to the quarter-plane a &lt;= 0, b &lt;= 0.&quot;&quot;&quot;
+    oa = max(a, 0.0); ob = max(b, 0.0)
+    return math.sqrt(oa * oa + ob * ob) + min(max(a, b), 0.0)
+
+@njit(**NJ)
+def sd_cap(x, y, z, ax, ay, az, bx, by, bz, r):
+    px = x - ax; py = y - ay; pz = z - az
+    ex = bx - ax; ey = by - ay; ez = bz - az
+    h = (px * ex + py * ey + pz * ez) / (ex * ex + ey * ey + ez * ez + 1e-12)
+    if h &lt; 0: h = 0.0
+    if h &gt; 1: h = 1.0
+    px -= ex * h; py -= ey * h; pz -= ez * h
+    return math.sqrt(px * px + py * py + pz * pz) - r
+
+@njit(**NJ)
+def tex(T, u, v):
+    h = T.shape[0]; w = T.shape[1]
+    if u &lt; 0.0 or u &gt;= 1.0 or v &lt; 0.0 or v &gt;= 1.0: return 0.0
+    x = u * w - 0.5; y = v * h - 0.5
+    i = int(math.floor(x)); j = int(math.floor(y)); fx = x - i; fy = y - j
+    i0 = min(max(i, 0), w - 1); i1 = min(max(i + 1, 0), w - 1)
+    j0 = min(max(j, 0), h - 1); j1 = min(max(j + 1, 0), h - 1)
+    a = T[j0, i0] + fx * (T[j0, i1] - T[j0, i0]); b = T[j1, i0] + fx * (T[j1, i1] - T[j1, i0])
+    return a + fy * (b - a)
+
+@njit(**NJ)
+def water_h(x, y):
+    &quot;&quot;&quot;height of a point above the surface of the water, measured square to that surface.&quot;&quot;&quot;
+    return (x - WX0) * WNX + (y - WY0) * WNY
+
+
+# ------------------------------------------------------------------ the stair
+@njit(**NJ)
+def scene(x, y, z):
+    # ---- the well is a box of air; what follows is concrete put back into it
+    d = -sd_box(x - XC, y - YC, z - ZC, XH, YH, ZH); m = M_CONC
+    q = quad(z - ZS + ARR, y + ARR) - ARR                                     # the half-landing we stand on
+    if q &lt; d: d = q
+    # ---- left flight, down to the boat landing
+    la = (y + PITCH * (z - ZS)) * CP                                          # height above the line of the nosings
+    if la &gt; 0.40:
+        fa = la
+    else:
+        k0 = int(math.floor((z - ZS) / TR)); fa = 1e9
+        for k in range(k0 - 1, k0 + 4):
+            if k &lt; 1 or k &gt; NST - 1: continue
+            q = quad(z - (ZS + TR * k) + ARR, y + RI * k + ARR) - ARR
+            if q &lt; fa: fa = q
+    fa = max(fa, x + SP)
+    if fa &lt; d: d = fa
+    # ---- right flight, up to the offices
+    lb = max((y - RI - PITCH * (z - ZS)) * CP, max(ZS - z, y - YU))
+    if lb &gt; 0.40:
+        fb = lb
+    else:
+        k0 = int(math.floor((z - ZS) / TR)) + 1; fb = 1e9
+        for k in range(k0 - 1, k0 + 4):
+            if k &lt; 1 or k &gt; NST: continue
+            z0 = ZS + TR * (k - 1)
+            q = sd_box2(z - (z0 + ZE) * 0.5, y - (RI * k + YB - 1.0) * 0.5, (ZE - z0) * 0.5 - ARR, (RI * k - YB + 1.0) * 0.5 - ARR) - ARR
+            if q &lt; fb: fb = q
+    fb = max(fb, SP - x)
+    if fb &lt; d: d = fb
+    # ---- spine wall, office landing, and the underside of the flight above the left one
+    q = sd_box(x, y - YC, z - (ZS + ZE) * 0.5, SP, YH + 1.0, (ZE - ZS) * 0.5)
+    if q &lt; d: d = q
+    q = sd_box(x - XC, y - (YU - SLAB * 0.5), z - (ZE + ZB) * 0.5, XH + 1.0, SLAB * 0.5, (ZB - ZE) * 0.5 + 1.0)
+    q = max(q, ZE - z)
+    if q &lt; d: d = q
+    q = max(((YU - SLAB) + PITCH * (ZE - z) - y) * CP, max(x + SP, z - ZE))
+    if q &lt; d: d = q
+    # ---- handrail, left wall: 42 mm tube, 0.92 m over the nosings, on pins
+    if x &lt; XL + 0.16:
+        dr = sd_cap(x, y, z, RXL, RAH, ZS - 0.9, RXL, RAH, ZS, RR)
+        dr = min(dr, sd_cap(x, y, z, RXL, RAH, ZS, RXL, RAH + YB, ZE, RR))
+        dr = min(dr, sd_cap(x, y, z, RXL, RAH + YB, ZE, RXL, RAH + YB, ZE + 0.30, RR))
+        if dr &lt; d: d = dr; m = M_RAIL
+        zb = ZS + 0.45 + 1.1 * math.floor((z - ZS - 0.45) / 1.1 + 0.5)
+        zb = min(max(zb, ZS + 0.45), ZS + 3.75)
+        yb = RAH - PITCH * (zb - ZS)
+        db = sd_cap(x, y, z, XL - 0.01, yb - 0.065, zb, RXL, yb - 0.016, zb, 0.008)
+        if db &lt; d: d = db; m = M_GALV
+    else:
+        bd = x - (XL + 0.16)
+        if bd &lt; d: d = max(bd, 0.03)
+    # ---- handrail, right wall
+    if x &gt; XR - 0.16:
+        dr = sd_cap(x, y, z, RXR, RAH, ZS - 0.3, RXR, RAH, ZS, RR)
+        dr = min(dr, sd_cap(x, y, z, RXR, RAH, ZS, RXR, RAH + YU, ZE - TR, RR))
+        dr = min(dr, sd_cap(x, y, z, RXR, RAH + YU, ZE - TR, RXR, RAH + YU, ZB - 0.2, RR))
+        if dr &lt; d: d = dr; m = M_RAIL
+        zb = ZS + 0.45 + 1.1 * math.floor((z - ZS - 0.45) / 1.1 + 0.5)
+        zb = min(max(zb, ZS + 0.45), ZS + 3.75)
+        yb = RAH + PITCH * (zb - ZS) * (ZE - ZS) / (ZE - TR - ZS)
+        db = sd_cap(x, y, z, XR + 0.01, yb - 0.065, zb, RXR, yb - 0.016, zb, 0.008)
+        if db &lt; d: d = db; m = M_GALV
+    else:
+        bd = (XR - 0.16) - x
+        if bd &lt; d: d = max(bd, 0.03)
+    # ---- the sodium lamp: arm, cast cap, well-glass, wire guard
+    bd = sd_box(x - (XL + 0.12), y - 0.39, z - L0Z, 0.135, 0.185, 0.085)
+    if bd &lt; 0.02:
+        da = sd_cap(x, y, z, XL - 0.01, 0.535, L0Z, L0X, 0.535, L0Z, 0.011)
+        da = min(da, sd_box(x - XL, y - 0.535, z - L0Z, 0.006, 0.045, 0.045))
+        rr = math.sqrt((x - L0X) ** 2 + (z - L0Z) ** 2)
+        da = min(da, max(rr - 0.055 + 0.25 * (y - 0.44), abs(y - 0.485) - 0.045))      # the cap, a little conical
+        if da &lt; d: d = da; m = M_HOUS
+        ex = (x - L0X) / 0.050; ey = (y - L0Y) / 0.092; ez = (z - L0Z) / 0.050        # the glass
+        k0 = math.sqrt(ex * ex + ey * ey + ez * ez)
+        k1 = math.sqrt((ex / 0.050) ** 2 + (ey / 0.092) ** 2 + (ez / 0.050) ** 2)
+        dg = k0 * (k0 - 1.0) / (k1 + 1e-9)
+        if dg &lt; d: d = dg; m = M_GLASS
+        dq = math.sqrt((rr - 0.064) ** 2 + (y - 0.40) ** 2) - 0.0028                   # guard: two hoops, a small one, six wires
+        dq = min(dq, math.sqrt((rr - 0.064) ** 2 + (y - 0.31) ** 2) - 0.0028)
+        dq = min(dq, math.sqrt((rr - 0.028) ** 2 + (y - 0.225) ** 2) - 0.0028)
+        an = math.atan2(z - L0Z, x - L0X); an = an - math.floor(an / 1.0471976 + 0.5) * 1.0471976
+        wx = rr * math.cos(an); wz = rr * math.sin(an)
+        dq = min(dq, sd_cap(wx, y, wz, 0.064, 0.44, 0.0, 0.064, 0.29, 0.0, 0.0024))
+        dq = min(dq, sd_cap(wx, y, wz, 0.064, 0.29, 0.0, 0.028, 0.225, 0.0, 0.0024))
+        if dq &lt; d: d = dq; m = M_WIRE
+    elif bd &lt; d:
+        d = max(bd, 0.02)
+    # ---- its conduit, up the wall to the slab
+    bd = sd_box(x - (XL + 0.012), y - 1.36, z - L0Z, 0.03, 0.84, 0.03)
+    if bd &lt; 0.02:
+        dq = sd_cap(x, y, z, XL + 0.011, 0.56, L0Z, XL + 0.011, YU - SLAB, L0Z, 0.010)
+        yk = 0.85 + 0.6 * math.floor((y - 0.85) / 0.6 + 0.5)
+        dq = min(dq, sd_box(x - (XL + 0.008), y - yk, z - L0Z, 0.016, 0.009, 0.022) - 0.002)
+        if dq &lt; d: d = dq; m = M_GALV
+    elif bd &lt; d:
+        d = max(bd, 0.02)
+    # ---- tide staff, on the back wall
+    q = sd_box(x - STX, y - (ST0 + ST1) * 0.5, z - (ZB - 0.007), 0.07, (ST1 - ST0) * 0.5, 0.007) - 0.001
+    if q &lt; d: d = q; m = M_STAFF
+    # ---- downpipe, 100 mm cast iron, with its collars
+    rr = math.sqrt((x - DPX) ** 2 + (z - DPZ) ** 2)
+    bd = rr - 0.085
+    if bd &lt; 0.02:
+        dq = max(rr - 0.052, y - YU + 0.1)
+        yk = 0.30 + 1.45 * math.floor((y - 0.30) / 1.45 + 0.5)
+        dq = min(dq, max(rr - 0.062, abs(y - yk) - 0.035) - 0.002)
+        dq = min(dq, sd_box(x - DPX, y - yk + 0.06, z - (DPZ + ZB) * 0.5, 0.016, 0.012, (ZB - DPZ) * 0.5))
+        if dq &lt; d: d = dq; m = M_PIPE
+    elif bd &lt; d:
+        d = max(bd, 0.03)
+    # ---- life ring on its peg, left wall
+    bd = sd_box(x - (XL + 0.07), y - BYC, z - BZC, 0.085, BRA + BRI + 0.02, BRA + BRI + 0.02)
+    if bd &lt; 0.02:
+        rr = math.sqrt((y - BYC) ** 2 + (z - BZC) ** 2)
+        dq = math.sqrt((rr - BRA) ** 2 + ((x - (XL + 0.066)) * 1.25) ** 2) / 1.25 - BRI / 1.25 * 1.12
+        if dq &lt; d: d = dq; m = M_BUOY
+        dq = sd_cap(x, y, z, XL - 0.01, BYC + BRA - BRI - 0.014, BZC, XL + 0.13, BYC + BRA - BRI - 0.008, BZC, 0.009)
+        dq = min(dq, sd_cap(x, y, z, XL + 0.13, BYC + BRA - BRI - 0.008, BZC, XL + 0.135, BYC + BRA - BRI + 0.03, BZC, 0.009))
+        if dq &lt; d: d = dq; m = M_GALV
+    elif bd &lt; d:
+        d = max(bd, 0.03)
+    # ---- the cup, left on the landing
+    bd = sd_box(x - MX - 0.012, y - 0.046, z - MZ + 0.012, 0.075, 0.05, 0.075)
+    if bd &lt; 0.02:
+        rr = math.sqrt((x - MX) ** 2 + (z - MZ) ** 2)
+        dq = max(max(rr - 0.042, abs(y - 0.043) - 0.043), -max(rr - 0.0392, 0.030 - y)) - 0.0008
+        a = (x - MX) * 0.60 - (z - MZ) * 0.80 - 0.047; c = (x - MX) * 0.80 + (z - MZ) * 0.60
+        dq = min(dq, math.sqrt((math.sqrt(a * a + (y - 0.046) ** 2) - 0.021) ** 2 + c * c) - 0.0048)
+        if dq &lt; d: d = dq; m = M_MUG
+    elif bd &lt; d:
+        d = max(bd, 0.02)
+    # ---- the plumb line: pin, cord, brass bob.  It is vertical because x and z do not change along it.
+    bd = sd_box(x - PLX, y - (PLTOP + PLBOT) * 0.5, z - (PLZ + ZB) * 0.5, 0.03, (PLTOP - PLBOT) * 0.5 + 0.03, (ZB - PLZ) * 0.5 + 0.03)
+    if bd &lt; 0.01:
+        dn = sd_cap(x, y, z, PLX, PLTOP - 0.010, ZB + 0.01, PLX, PLTOP + 0.004, PLZ - 0.006, 0.0030)
+        if dn &lt; d: d = dn; m = M_NAIL
+        dc = sd_cap(x, y, z, PLX, PLTOP, PLZ, PLX, PLBOT + 0.15, PLZ, PLR)
+        if dc &lt; d: d = dc; m = M_CORD
+        rr = math.sqrt((x - PLX) ** 2 + (z - PLZ) ** 2); h = y - PLBOT
+        if h &lt; 0.07: R = 0.021 * h / 0.07
+        elif h &lt; 0.135: R = 0.021
+        else: R = 0.007
+        db = max((rr - R) * 0.85, max(-h, h - 0.155))
+        if db &lt; d: d = db; m = M_BRASS
+    elif bd &lt; d:
+        d = max(bd, 0.004)
+    return d, m
+
+
+@njit(**NJ)
+def march(ox, oy, oz, dx, dy, dz, tmax):
+    t = 0.0
+    for s in range(600):
+        d, m = scene(ox + dx * t, oy + dy * t, oz + dz * t)
+        if d &lt; 0.00012 * t + 0.00003:
+            return t, m
+        t += d
+        if t &gt; tmax: break
+    return 1e9, 0
+
+@njit(**NJ)
+def trace(ox, oy, oz, dx, dy, dz, tmax):
+    &quot;&quot;&quot;the solids, and the surface of the water if it comes first.&quot;&quot;&quot;
+    t, m = march(ox, oy, oz, dx, dy, dz, tmax)
+    h = water_h(ox, oy); den = dx * WNX + dy * WNY
+    if h &gt; 0.0 and den &lt; -1e-9:
+        tw = -h / den
+        if tw &lt; t: return tw, M_WATER
+    return t, m
+
+@njit(**NJ)
+def occl(ox, oy, oz, dx, dy, dz, maxt):
+    t = 0.0
+    for s in range(300):
+        d, m = scene(ox + dx * t, oy + dy * t, oz + dz * t)
+        if d &lt; 0.0003: return True
+        t += d
+        if t &gt;= maxt: return False
+    return False
+
+@njit(**NJ)
+def normal(px, py, pz, t):
+    e = 0.00012 * t + 0.0001
+    nx = scene(px + e, py, pz)[0] - scene(px - e, py, pz)[0]
+    ny = scene(px, py + e, pz)[0] - scene(px, py - e, pz)[0]
+    nz = scene(px, py, pz + e)[0] - scene(px, py, pz - e)[0]
+    nl = math.sqrt(nx * nx + ny * ny + nz * nz) + 1e-12
+    return nx / nl, ny / nl, nz / nl
+
+
+# ------------------------------------------------------------------ surfaces
+@njit(**NJ)
+def dado_line(x, y, z):
+    &quot;&quot;&quot;top of the green paint: 1.05 m over the floor on a landing, the same over the nosings on a flight.&quot;&quot;&quot;
+    if z &gt; ZE:
+        if y &gt; YU - 0.1: return YU + DADO
+        return YB + DADO
+    if z &lt; ZS + 0.002: return DADO
+    if x &lt; 0.0: return DADO - PITCH * (z - ZS)
+    return DADO + PITCH * (z - ZS) + 0.10
+
+@njit(**NJ)
+def material(px, py, pz, nx, ny, nz, m, fp):
+    &quot;&quot;&quot;albedo, reflectance at normal incidence (rgb), roughness, shading normal.  fp = size of a pixel on the surface, metres.&quot;&quot;&quot;
+    ar = 0.5; ag = 0.5; ab = 0.5; f0r = 0.0; f0g = 0.0; f0b = 0.0; ro = 1.0
+    tu = px + pz; tw = 1.0                                                     # coordinates for the tide mark
+    if m == M_CONC and ny &gt; 0.7:
+        # ---------------- floors and treads: steel-trowelled, worn, damp
+        mott = 1.0 + 0.32 * (fbm3(px * 1.7, 1.0, pz * 1.7, 4) - 0.5)
+        sp = 1.0 + 0.20 * (hash3(int(math.floor(px / 0.005)), 5, int(math.floor(pz / 0.005))) - 0.5) * sstep(0.02, 0.004, fp)
+        sp *= 1.0 - 0.38 * sstep(0.58, 0.70, fbm3(px * 2.6 + 9.0, 3.0, pz * 2.6, 4))               # old stains
+        ar = 0.335 * mott * sp; ag = 0.320 * mott * sp; ab = 0.295 * mott * sp
+        ro = 0.55; f0r = 0.035
+        left = px &lt; 0.0
+        en = 9.0; mid = -1.14
+        if left:
+            if pz &lt; ZS: en = ZS - pz
+            elif pz &lt; ZE:
+                zt = (pz - ZS) / TR; en = (1.0 - (zt - math.floor(zt))) * TR
+        else:
+            mid = 0.89
+            if pz &gt;= ZS and pz &lt; ZE:
+                zt = (pz - ZS) / TR; en = (zt - math.floor(zt)) * TR
+        path = math.exp(-((px - mid) / 0.55) ** 2)
+        ar *= 1 + 0.12 * path; ag *= 1 + 0.12 * path; ab *= 1 + 0.12 * path
+        if en &lt; 1.0:                                                           # a tread: dirt lies at the back of it and along the walls
+            gr = math.exp(-(TR - en) / 0.028) * 0.55 + 0.35 * math.exp(-(1.06 - abs(px - mid)) / 0.05)
+            gr *= 0.6 + 0.8 * fbm3(px * 6.0, py * 3.0, pz * 6.0, 2)
+            gr = min(gr, 0.8)
+            ar *= 1 - 0.55 * gr; ag *= 1 - 0.56 * gr; ab *= 1 - 0.58 * gr
+        ck = abs(pz - 1.05 - 0.55 * px - 0.09 * math.sin(px * 5.0) - 0.05 * fbm3(px * 9.0, 0.0, 3.0, 2))    # a crack across the landing
+        if pz &lt; ZS and ck &lt; 0.0022: ar *= 0.55; ag *= 0.55; ab *= 0.55
+        if en &lt; 0.060:                                                         # nosings were painted yellow once
+            wear = sstep(0.47, 0.53, 0.6 * fbm3(px * 11.0, py * 7.0, pz * 11.0, 3) + 0.4 * fbm3(px * 63.0, py * 7.0, pz * 63.0, 2) + 0.16 * path)
+            k = (1.0 - 0.85 * wear) * sstep(0.060, 0.054, en)
+            ar += (0.62 - ar) * k; ag += (0.47 - ag) * k; ab += (0.06 - ab) * k
+            ro = 0.55 - 0.2 * k
+            arr = math.exp(-en / 0.004)                                        # the arris is chipped pale
+            ar += 0.10 * arr; ag += 0.10 * arr; ab += 0.10 * arr
+        if pz &lt; ZS and py &gt; -0.05:                                             # the landing: where the floor is still wet
+            wm = sstep(0.46, 0.53, fbm3(px * 1.5 + 3.0, 7.0, pz * 1.5, 4) + 0.10 * sstep(1.0, 2.0, pz))
+            wh = sstep(0.41, 0.46, fbm3(px * 1.5 + 3.0, 7.0, pz * 1.5, 4) + 0.10 * sstep(1.0, 2.0, pz))
+            ar *= (1 - 0.40 * wm) * (1 - 0.16 * wh); ag *= (1 - 0.39 * wm) * (1 - 0.16 * wh); ab *= (1 - 0.37 * wm) * (1 - 0.15 * wh)
+            ro = 0.55 - 0.49 * wm
+            nx += 0.004 * (noise3(px * 9.0, 0.0, pz * 9.0) - 0.5) * wm; nz += 0.004 * (noise3(px * 9.0, 4.0, pz * 9.0) - 0.5) * wm
+            gx = abs(px - GUX); gz = abs(pz - GUZ)                             # gully, 150 mm, cast iron
+            if gx &lt; 0.082 and gz &lt; 0.082:
+                if gx &lt; 0.075 and gz &lt; 0.075:
+                    sl = (px - GUX + 0.075) / 0.0136; sl = sl - math.floor(sl)
+                    if sl &gt; 0.25 and sl &lt; 0.70 and gz &lt; 0.058 and abs(gz - 0.029) &gt; 0.004 and gx &lt; 0.066: ar = 0.004; ag = 0.004; ab = 0.004
+                    else: ar = 0.060; ag = 0.050; ab = 0.042
+                    ro = 0.35
+                else:
+                    ar *= 0.5; ag *= 0.5; ab *= 0.5
+        tw = 0.6
+    elif m == M_CONC:
+        # ---------------- walls and soffits: concrete cast against boards
+        if ny &lt; -0.7:
+            u = px; v = pz * 1.159 + py * 0.0; w0 = 17.0; wid = 17
+        elif abs(nx) &gt; 0.7:
+            u = pz; v = py; wid = 3 + 2 * int(math.floor(px + 0.5)); w0 = float(wid)
+        else:
+            u = px; v = py; wid = 11 + int(math.floor(pz * 0.5 + 0.5)); w0 = float(wid)
+        tu = u
+        wall = abs(nx) &gt; 0.7 or ny &lt; -0.7 or pz &gt; ZB - 0.05 or pz &lt; ZF + 0.05 or (abs(px) &lt; SP + 0.002 and pz &lt; ZS + 0.01)
+        BH = 0.145 if wall else 5.0                                           # a riser was cast against one board
+        vb = v / BH + 0.37 * wid
+        bi = int(math.floor(vb)); fv = vb - bi
+        tone = 1.0 + 0.15 * (hash3(bi, 41, wid) - 0.5)
+        tone *= 1.0 + 0.12 * (fbm3(u * 1.3 + 7.0 * hash3(bi, 43, wid), v * 85.0, w0, 2) - 0.5)       # grain printed from the board
+        ej = min(fv, 1.0 - fv) * BH
+        jl = sstep(0.0045, 0.0012, ej)
+        bn = bi + 1 if fv &gt; 0.5 else bi - 1
+        tone *= 1.0 - 0.30 * jl * (0.5 + 0.5 * noise3(u * 9.0, float(bi), w0)) * (0.2 + 0.8 * hash3(max(bi, bn), 45, wid))
+        stepb = (hash3(bi, 47, wid) - hash3(bn, 47, wid)) * (1.0 if fv &gt; 0.5 else -1.0)             # each board sat a millimetre proud or shy
+        bump = 4.0 * stepb * sstep(0.007, 0.0, ej) + 1.6 * (fv - 0.5) * (hash3(bi, 49, wid) - 0.5)
+        ue = (u + 3.3 * hash3(bi, 53, wid)) / 3.3; ue = (ue - math.floor(ue)) * 3.3                    # where one board ended and the next began
+        if ue &lt; 0.004: tone *= 0.80
+        # tie holes, and what has run out of them
+        hu = u / 1.20 + 0.31; hv = v / 0.725 + 0.18
+        hi = int(math.floor(hu)); hj = int(math.floor(hv))
+        du = (hu - hi - 0.5) * 1.20; dv = (hv - hj - 0.5) * 0.725
+        hr = math.sqrt(du * du + dv * dv)
+        if hr &lt; 0.016: tone *= 0.42 + 0.3 * sstep(0.010, 0.016, hr)
+        rs = 0.0
+        if ny &gt; -0.7 and dv &lt; 0.0:
+            ln = 0.10 + 0.50 * hash3(hi, 59, hj + wid)
+            rs = math.exp(-(du / (0.010 + 0.02 * (-dv))) ** 2) * sstep(-ln, -ln * 0.3, dv) * (0.4 + 0.6 * hash3(hi, 61, hj + wid))
+        # blowholes
+        if fp &lt; 0.008:
+            ci = int(math.floor(u / 0.011)); cj = int(math.floor(v / 0.011))
+            if hash3(ci, 67 + wid, cj) &lt; 0.035:
+                bx = (u / 0.011 - ci - 0.3 - 0.4 * hash3(ci, 69, cj)); by = (v / 0.011 - cj - 0.3 - 0.4 * hash3(ci, 71, cj))
+                if bx * bx + by * by &lt; 0.02 + 0.06 * hash3(ci, 73, cj): tone *= 0.62
+        mott = 1.0 + 0.36 * (fbm3(u * 0.75 + 5.0, v * 0.75, w0 + 1.0, 4) - 0.5)
+        mott *= 1.0 + 0.16 * (fbm3(u * 4.0, v * 4.0, w0 + 2.0, 3) - 0.5)
+        run = sstep(0.52, 0.75, fbm3(u * 3.6, v * 0.55, w0 + 3.0, 3))                                   # dirt run down from above
+        ar = 0.415 * tone * mott; ag = 0.395 * tone * mott; ab = 0.360 * tone * mott
+        if ny &gt; -0.7:
+            ar *= 1 - 0.24 * run; ag *= 1 - 0.25 * run; ab *= 1 - 0.27 * run
+            ar *= 1 - 0.20 * rs; ag *= 1 - 0.42 * rs; ab *= 1 - 0.62 * rs                                # rust
+            top = YU - SLAB if (px &lt; 0.0 and pz &gt; ZS) else YT                                           # water has come down from the slab
+            st = sstep(0.50, 0.78, fbm3(u * 5.5, 0.3, w0 + 9.0, 3)) * math.exp(-(top - py) / (0.5 + 2.2 * fbm3(u * 2.1, 0.6, w0 + 11.0, 2)))
+            ar *= 1 - 0.42 * st; ag *= 1 - 0.42 * st; ab *= 1 - 0.40 * st
+            edge = HWL + 0.36 + 0.30 * fbm3(u * 2.3, 0.7, w0 + 13.0, 3) + 0.05 * fbm3(u * 11.0, 0.7, w0, 2)  # and has climbed from the sea
+            rd = sstep(edge, edge - 0.04, py)
+            ar *= 1 - 0.27 * rd; ag *= 1 - 0.26 * rd; ab *= 1 - 0.25 * rd
+            fr_ = math.exp(-((py - edge) / 0.012) ** 2) * (0.4 + 0.6 * fbm3(u * 12.0, v * 12.0, w0, 2))
+            ar += (0.60 - ar) * 0.30 * fr_; ag += (0.59 - ag) * 0.30 * fr_; ab += (0.56 - ab) * 0.30 * fr_
+            lime = sstep(0.60, 0.80, fbm3(u * 2.2 + 9.0, v * 0.5, w0 + 5.0, 3)) * sstep(0.5, 0.75, fbm3(u * 14.0, v * 2.0, w0, 2))
+            ar += (0.62 - ar) * 0.35 * lime; ag += (0.60 - ag) * 0.35 * lime; ab += (0.56 - ab) * 0.35 * lime   # lime bloom
+        # the forms bowed a little between ties
+        e = 0.03
+        h0 = fbm3(u * 1.6, v * 1.6, w0, 3)
+        gu = (fbm3((u + e) * 1.6, v * 1.6, w0, 3) - h0) / e
+        gv = (fbm3(u * 1.6, (v + e) * 1.6, w0, 3) - h0) / e
+        amp = 0.0065
+        if fp &lt; 0.02:                                                                                 # the tooth of the surface
+            kk = sstep(0.02, 0.006, fp)
+            gu += kk * (22.0 * (noise3(u * 130.0, v * 130.0, w0) - 0.5) + 12.0 * (noise3(u * 43.0, v * 43.0, w0 + 5.0) - 0.5))
+            gv += kk * (22.0 * (noise3(u * 130.0 + 31.7, v * 130.0, w0 + 7.0) - 0.5) + 12.0 * (noise3(u * 43.0, v * 43.0 + 17.0, w0 + 9.0) - 0.5))
+        if wall and ny &gt; -0.7:                                                                        # where one day&#x27;s pour stopped
+            yp = 0.63 + 0.05 * (fbm3(u * 2.3, 1.1, w0, 3) - 0.5)
+            pl_ = math.exp(-((py - yp) / 0.006) ** 2) * (0.4 + 0.6 * noise3(u * 15.0, 2.0, w0))
+            ar *= 1 - 0.28 * pl_; ag *= 1 - 0.28 * pl_; ab *= 1 - 0.28 * pl_
+            if py &lt; yp: ar *= 0.94; ag *= 0.94; ab *= 0.95
+        if ny &lt; -0.7: nx -= amp * gu; nz -= amp * gv + bump * 0.02
+        elif abs(nx) &gt; 0.7: nz -= amp * gu; ny -= amp * gv + bump * 0.02
+        else: nx -= amp * gu; ny -= amp * gv + bump * 0.02
+        # sea-green gloss to 1.05 m
+        if not wall:                                                           # risers: boots have marked them
+            yl = py / RI; yl = (yl - math.floor(yl)) * RI
+            midr = 0.89 if px &gt; 0.0 else -1.14
+            sc = 0.8 * sstep(0.55, 0.66, fbm3(px * 19.0, py * 95.0, pz * 3.0, 3)) * math.exp(-((px - midr) / 0.6) ** 2) * sstep(RI, 0.02, yl)
+            sc += 0.7 * math.exp(-yl / 0.012)
+            sc = min(sc, 1.0)
+            ar *= 1 - 0.50 * sc; ag *= 1 - 0.51 * sc; ab *= 1 - 0.52 * sc
+            ar *= 0.86; ag *= 0.86; ab *= 0.86
+        if ny &gt; -0.7 and wall:
+            dl = dado_line(px, py, pz) + 0.004 * (noise3(u * 7.0, 2.0, w0) - 0.5)
+            if py &lt; dl:
+                pk = 0.62 * fbm3(u * 7.0, v * 3.2, w0 + 7.0, 4) + 0.38 * fbm3(u * 37.0, v * 31.0, w0, 3) + 0.035
+                thr = 0.71 - 0.26 * sstep(HWL + 0.85, HWL - 0.1, py)                                  # the sea takes the paint off from below
+                pm = sstep(thr, thr - 0.012, pk)
+                edge = sstep(thr - 0.035, thr - 0.012, pk) * pm                                        # paint lifts pale at a broken edge
+                gr = 0.225 * (0.96 + 0.08 * mott); gg = 0.405 * (0.96 + 0.08 * mott); gb = 0.330 * (0.96 + 0.08 * mott)
+                gr *= 1 - 0.20 * run; gg *= 1 - 0.20 * run; gb *= 1 - 0.20 * run
+                gr *= 1 - 0.10 * jl; gg *= 1 - 0.10 * jl; gb *= 1 - 0.10 * jl
+                gr += 0.16 * edge; gg += 0.14 * edge; gb += 0.12 * edge
+                top = math.exp(-(dl - py) / 0.005)
+                gr *= 1 - 0.12 * top; gg *= 1 - 0.12 * top; gb *= 1 - 0.12 * top
+                ar += (gr - ar) * pm; ag += (gg - ag) * pm; ab += (gb - ab) * pm
+                if pm &gt; 0.5:
+                    f0r = 0.05; ro = 0.075 + 0.05 * (fbm3(u * 3.0, v * 3.0, w0, 2) - 0.5) + 0.25 * edge + 0.12 * run
+            else:
+                dirt = math.exp(-(py - dl) / 0.010)                                                    # dust rests on the top of the paint
+                ar *= 1 - 0.14 * dirt; ag *= 1 - 0.14 * dirt; ab *= 1 - 0.13 * dirt
+        if abs(px) &lt; SP + 0.002 and pz &lt; ZS + 0.01 and abs(nz) &gt; 0.7:                                    # the end of the spine wall: its arrises are knocked
+            ed = SP - abs(px)
+            chip = sstep(0.50, 0.62, fbm3(py * 21.0, px * 40.0, 3.0, 3)) * math.exp(-ed / 0.007) * (0.4 + 0.6 * sstep(1.9, 0.2, py))
+            ar += (0.50 - ar) * chip; ag += (0.48 - ag) * chip; ab += (0.44 - ab) * chip
+            if chip &gt; 0.3: f0r = 0.0; ro = 1.0
+            hand = math.exp(-((py - 1.05) / 0.35) ** 2) * (0.5 + 0.5 * fbm3(px * 30.0, py * 6.0, 1.0, 2))    # and hands have turned on it
+            ar *= 1 - 0.16 * hand; ag *= 1 - 0.16 * hand; ab *= 1 - 0.15 * hand
+        # lettering
+        if abs(nz) &gt; 0.7:
+            ink = 0.0
+            if pz &gt; ZB - 0.05:
+                ink = tex(TEX_SIGN, (px - SGX0) / (SGX1 - SGX0), (SGY0 + SGH - py) / SGH)
+            elif pz &lt; ZS + 0.01 and pz &gt; ZS - 0.05:
+                ink = tex(TEX_3, (px + 0.046) / 0.092, (1.62 - py) / (0.092 * TEX_3.shape[0] / TEX_3.shape[1]))
+            if ink &gt; 0.0:
+                ink *= 0.60 + 0.40 * sstep(0.25, 0.55, fbm3(u * 21.0, v * 21.0, 5.0, 3))               # the brush was nearly dry in places
+                ar *= 1 - 0.90 * ink; ag *= 1 - 0.90 * ink; ab *= 1 - 0.90 * ink
+    elif m == M_RAIL:                                       # handrail: oxblood gloss over red lead
+        k = fbm3(px * 14.0, py * 14.0, pz * 14.0, 3)
+        chip = sstep(0.60, 0.64, k)
+        ar = 0.250 - 0.07 * chip; ag = 0.060 + 0.035 * chip; ab = 0.048; f0r = 0.05; ro = 0.10 + 0.45 * chip
+        tu = pz; tw = 0.4
+    elif m == M_GALV:
+        ar = 0.33; ag = 0.335; ab = 0.34; f0r = 0.0; ro = 0.6
+    elif m == M_HOUS:
+        ar = 0.23; ag = 0.24; ab = 0.235
+    elif m == M_WIRE:
+        ar = 0.10; ag = 0.09; ab = 0.08
+    elif m == M_STAFF:                                      # tide staff: enamel, black on white, red at the metres
+        ar = 0.74; ag = 0.73; ab = 0.67; f0r = 0.05; ro = 0.12
+        if nz &lt; -0.7:
+            u = (px - STX + 0.07) / 0.14
+            hg = (py - STZERO) * 10.0; dm = int(math.floor(hg)); f = hg - dm
+            slot = int(f * 5.0)
+            ink = 0.0
+            if dm % 2 == 0:
+                if u &gt; 0.06 and u &lt; 0.46 and (slot % 2 == 0 or u &lt; 0.16): ink = 1.0
+            else:
+                if u &gt; 0.06 and u &lt; 0.46 and (slot % 2 == 1 or u &gt; 0.36): ink = 1.0
+            red = dm % 10 == 0
+            if u &gt; 0.52:
+                dg = dm % 10
+                if red: dg = (dm // 10) % 10
+                g = tex(TEX_DIG, (dg + min(max((u - 0.55) / 0.40, 0.0), 0.999)) / 10.0, 1.0 - (f - 0.12) / 0.76)
+                if g &gt; 0.0:
+                    if red: ar += (0.52 - ar) * g; ag += (0.05 - ag) * g; ab += (0.04 - ab) * g
+                    else: ink = max(ink, g)
+            ar *= 1 - 0.94 * ink; ag *= 1 - 0.94 * ink; ab *= 1 - 0.94 * ink
+            k = sstep(0.68, 0.76, fbm3(px * 30.0, py * 30.0, 3.0, 3) + 0.25 * math.exp(-min(u, 1 - u) / 0.05))   # rust at the chips and edges
+            ar += (0.13 - ar) * k; ag += (0.072 - ag) * k; ab += (0.045 - ab) * k; ro += 0.5 * k
+            sy = (py - ST0) / 0.72; sy = abs(sy - math.floor(sy) - 0.5) * 0.72
+            if sy &lt; 0.007 and abs(u - 0.5) &lt; 0.05: ar = 0.16; ag = 0.11; ab = 0.07                       # screws
+        tu = px; tw = 0.75
+    elif m == M_BUOY:                                       # life ring: orange and white quarters
+        an = math.atan2(py - BYC, pz - BZC) / 1.5707963 + 0.5
+        q = int(math.floor(an)); fq = an - q
+        grime = 0.80 + 0.30 * fbm3(px * 9.0, py * 9.0, pz * 9.0, 3)
+        if q % 2 == 0: ar = 0.80 * grime; ag = 0.19 * grime; ab = 0.035 * grime
+        else: ar = 0.72 * grime; ag = 0.70 * grime; ab = 0.64 * grime
+        if min(fq, 1 - fq) &lt; 0.03: ar = 0.50 * grime; ag = 0.47 * grime; ab = 0.40 * grime                # the lashings of the grab line
+        f0r = 0.04; ro = 0.30
+    elif m == M_MUG:                                        # enamel cup, blue rim, yesterday&#x27;s coffee
+        rr = math.sqrt((px - MX) ** 2 + (pz - MZ) ** 2)
+        ar = 0.76; ag = 0.75; ab = 0.70; f0r = 0.05; ro = 0.07
+        if py &gt; 0.0835 and rr &gt; 0.037: ar = 0.035; ag = 0.060; ab = 0.230
+        if ny &gt; 0.5 and rr &lt; 0.0392 and py &lt; 0.05: ar = 0.030; ag = 0.018; ab = 0.010; ro = 0.02
+        k = sstep(0.78, 0.82, fbm3(px * 60.0, py * 60.0, pz * 60.0, 2))
+        k *= sstep(0.076, 0.084, py) + sstep(0.010, 0.002, py)
+        ar *= 1 - 0.9 * k; ag *= 1 - 0.9 * k; ab *= 1 - 0.9 * k
+    elif m == M_CORD:
+        ar = 0.66; ag = 0.61; ab = 0.50; tw = 0.0
+    elif m == M_BRASS:
+        ar = 0.0; ag = 0.0; ab = 0.0; f0r = 0.86; f0g = 0.66; f0b = 0.33; ro = 0.16; tw = 0.0
+    elif m == M_NAIL:
+        ar = 0.10; ag = 0.09; ab = 0.085; f0r = 0.3; ro = 0.3; tw = 0.0
+    elif m == M_PIPE:                                       # cast iron, bitumen, rust
+        k = sstep(0.50, 0.72, fbm3(px * 5.0, py * 2.5, pz * 5.0, 4))
+        ar = 0.050 + 0.085 * k; ag = 0.047 + 0.028 * k; ab = 0.045 + 0.002 * k; f0r = 0.04; ro = 0.30 + 0.5 * k
+        tu = px * 3.0; tw = 0.9
+    # ---------------- the tide.  The marks it leaves are level.
+    if tw &gt; 0.0 and py &lt; HWL + 0.6:
+        hw = HWL + 0.016 * (fbm3(tu * 5.0, 1.7, 2.3, 3) - 0.5)
+        if py &lt; hw:
+            al = (0.55 + 0.37 * sstep(hw, hw - 0.12, py)) * tw
+            sl = 0.75 + 0.5 * fbm3(tu * 17.0, py * 17.0, 9.0, 2)
+            ar += (0.040 * sl - ar) * al; ag += (0.052 * sl - ag) * al; ab += (0.028 * sl - ab) * al        # weed
+            ro = ro + (0.20 - ro) * al; f0r = max(f0r, 0.03)
+        else:
+            damp = math.exp(-(py - hw) / 0.13) * tw
+            ar *= 1 - 0.40 * damp; ag *= 1 - 0.38 * damp; ab *= 1 - 0.36 * damp
+            for j in range(2):                                                                          # two older tides, higher
+                h2 = hw + 0.17 + 0.16 * j + 0.012 * (fbm3(tu * 3.0, 4.0 + j, 2.3, 2) - 0.5)
+                ln = math.exp(-((py - h2) / 0.005) ** 2) * (0.3 + 0.7 * noise3(tu * 6.0, float(j), 1.0)) * tw
+                ar += 0.07 * ln; ag += 0.07 * ln; ab += 0.065 * ln
+        cr = math.exp(-((py - hw - 0.004) / 0.011) ** 2) * (0.35 + 0.65 * fbm3(tu * 40.0, py * 40.0, 4.0, 2)) * tw   # salt and shell at the line
+        ar += (0.60 - ar) * 0.75 * cr; ag += (0.58 - ag) * 0.75 * cr; ab += (0.52 - ab) * 0.75 * cr
+        ro = ro + (0.7 - ro) * cr
+    if f0g == 0.0: f0g = f0r; f0b = f0r
+    nl = math.sqrt(nx * nx + ny * ny + nz * nz)
+    return ar, ag, ab, f0r, f0g, f0b, ro, nx / nl, ny / nl, nz / nl
+
+
+# ------------------------------------------------------------------ the lamps, directly
+@njit(**NJ)
+def lamps_at(px, py, pz, nx, ny, nz, vx, vy, vz, ro, q, Q, rot):
+    &quot;&quot;&quot;light arriving straight from the three lamps (one sample of each), and the highlight they make
+    on a surface of roughness ro seen along v.  Returns irradiance rgb and highlight rgb.&quot;&quot;&quot;
+    er = 0.0; eg = 0.0; eb = 0.0; sr = 0.0; sg = 0.0; sb = 0.0
+    hp = water_h(px, py)
+    ns = 2.0 / max(ro * ro, 1e-4) - 2.0
+    for l in range(3):
+        if l == 0:
+            cx = L0X - px; cy = L0Y - py; cz = L0Z - pz
+            dc = math.sqrt(cx * cx + cy * cy + cz * cz)
+            if abs(cy) &lt; 0.9 * dc: tx = -cz; ty = 0.0; tz = cx
+            else: tx = 1.0; ty = 0.0; tz = 0.0
+            tl = math.sqrt(tx * tx + ty * ty + tz * tz); tx /= tl; ty /= tl; tz /= tl
+            bx = (cy * tz - cz * ty) / dc; by = (cz * tx - cx * tz) / dc; bz = (cx * ty - cy * tx) / dc
+            rad = L0R * math.sqrt((q + 0.5) / Q); th = 2.39996323 * q + rot
+            lx = cx + rad * (math.cos(th) * tx + math.sin(th) * bx); ly = cy + rad * (math.cos(th) * ty + math.sin(th) * by)
+            lz = cz + rad * (math.cos(th) * tz + math.sin(th) * bz)
+            d = math.sqrt(lx * lx + ly * ly + lz * lz); lx /= d; ly /= d; lz /= d
+            cn = nx * lx + ny * ly + nz * lz
+            if cn &lt;= 0.0: continue
+            if dc &gt; 0.16 and occl(px, py, pz, lx, ly, lz, d - 0.135): continue
+            g = cn / max(dc * dc, 0.01)
+            cr = I0R * g; cg = I0G * g; cb = I0B * g
+        else:
+            if l == 1: ox = L1X; oy = L1Y; oz = L1Z; it = I1
+            else: ox = L2X; oy = L2Y; oz = L2Z; it = I2
+            if it &lt;= 0.0: continue
+            u = (((q * 7 + 3 * l) % Q) + (rot * 0.15915494 + 0.37 * l) % 1.0) / Q
+            lx = ox + (u - 0.5) * TLEN - px; ly = oy - py; lz = oz - pz
+            if ly &lt;= 0.0: continue
+            d2 = lx * lx + ly * ly + lz * lz; d = math.sqrt(d2); lx /= d; ly /= d; lz /= d
+            cn = nx * lx + ny * ly + nz * lz
+            if cn &lt;= 0.0: continue
+            g = it * (0.15 + 0.85 * ly) * cn / d2
+            if g &lt; 2e-5: continue
+            if occl(px, py, pz, lx, ly, lz, d - 0.03): continue
+            cr = ITR * g; cg = ITG * g; cb = ITB * g
+        if hp &lt; 0.0:                                         # the point is under water: the light has come down through it
+            pl = -hp / max(lx * WNX + ly * WNY, 0.2)
+            cr *= 0.95 * math.exp(-SIG_R * pl); cg *= 0.95 * math.exp(-SIG_G * pl); cb *= 0.95 * math.exp(-SIG_B * pl)
+        er += cr; eg += cg; eb += cb
+        if ro &lt; 0.6:
+            hx = lx - vx; hy = ly - vy; hz = lz - vz; hl = math.sqrt(hx * hx + hy * hy + hz * hz) + 1e-12
+            nh = max((nx * hx + ny * hy + nz * hz) / hl, 0.0)
+            s = (ns + 8.0) / 8.0 * nh ** ns / math.pi
+            sr += cr * s; sg += cg * s; sb += cb * s
+    return er, eg, eb, sr, sg, sb
+
+
+# ------------------------------------------------------------------ what the lamps light becomes small lamps
+@njit(**NJ)
+def make_lamps(n0, n1, n2):
+    n = n0 + n1 + n2
+    VP = np.zeros((2 * n, 3)); VN = np.zeros((2 * n, 3)); VC = np.zeros((2 * n, 3)); VR = np.full(2 * n, 0.40 ** 2)
+    k = 0
+    for i in range(n):
+        if i &lt; n0:
+            cz_ = 1.0 - 2.0 * (i + 0.5) / n0; s_ = math.sqrt(1.0 - cz_ * cz_); ph = 2.39996323 * i
+            dx = s_ * math.cos(ph); dy = cz_; dz = s_ * math.sin(ph)
+            ox = L0X + dx * 0.105; oy = L0Y + dy * 0.105; oz = L0Z + dz * 0.105
+            fr = 4 * math.pi * I0R / n0; fg = 4 * math.pi * I0G / n0; fb = 4 * math.pi * I0B / n0
+        else:
+            if i &lt; n0 + n1: j = i - n0; nn = n1; cx = L1X; cy = L1Y; cz = L1Z; it = I1; l = 1
+            else: j = i - n0 - n1; nn = n2; cx = L2X; cy = L2Y; cz = L2Z; it = I2; l = 2
+            r1 = (j + hash3(j, 61, l)) / nn; r2 = hash3(j, 63, l) * 2 * math.pi
+            r1 = (r1 * 37.0) % 1.0
+            if j % 4 == 0: cd = r1
+            else: cd = math.sqrt(r1)
+            sd = math.sqrt(max(1.0 - cd * cd, 0.0))
+            dx = sd * math.cos(r2); dy = -cd; dz = sd * math.sin(r2)
+            ox = cx + ((j + 0.5) / nn - 0.5) * TLEN; oy = cy - 0.03; oz = cz
+            f = it * math.pi * 1.15 / nn
+            fr = ITR * f; fg = ITG * f; fb = ITB * f
+        if scene(ox, oy, oz)[0] &lt; 0.004 or fr + fg + fb &lt;= 0.0: continue
+        t, m = march(ox, oy, oz, dx, dy, dz, 40.0)
+        if m == 0 or m == M_GLASS: continue
+        px = ox + dx * t; py = oy + dy * t; pz = oz + dz * t
+        hp = water_h(px, py)
+        if hp &lt; 0.0:
+            pl = -hp / max(-(dx * WNX + dy * WNY), 0.2)
+            fr *= 0.95 * math.exp(-SIG_R * pl); fg *= 0.95 * math.exp(-SIG_G * pl); fb *= 0.95 * math.exp(-SIG_B * pl)
+        nx, ny, nz = normal(px, py, pz, 1.0)
+        ar, ag, ab, f0r, f0g, f0b, ro, sx, sy, sz = material(px, py, pz, nx, ny, nz, m, 1.0)
+        fr *= ar; fg *= ag; fb *= ab
+        if fr + fg + fb &lt; 1e-9: continue
+        VP[k, 0] = px + nx * 0.01; VP[k, 1] = py + ny * 0.01; VP[k, 2] = pz + nz * 0.01
+        VN[k, 0] = nx; VN[k, 1] = ny; VN[k, 2] = nz
+        VC[k, 0] = fr / math.pi; VC[k, 1] = fg / math.pi; VC[k, 2] = fb / math.pi
+        if t &lt; 0.5: VR[k] = 0.25 ** 2
+        k += 1
+        # one more flight, cosine-distributed about the normal
+        qx0 = VP[k - 1, 0]; qy0 = VP[k - 1, 1]; qz0 = VP[k - 1, 2]
+        if abs(ny) &lt; 0.9: tx = -nz; ty = 0.0; tz = nx
+        else: tx = 1.0; ty = 0.0; tz = 0.0
+        tl = math.sqrt(tx * tx + ty * ty + tz * tz); tx /= tl; ty /= tl; tz /= tl
+        bx = ny * tz - nz * ty; by = nz * tx - nx * tz; bz = nx * ty - ny * tx
+        r1 = hash3(i, 3, 41); r2 = hash3(i, 5, 41) * 2 * math.pi
+        s_ = math.sqrt(r1); c = math.sqrt(1 - r1)
+        dx = s_ * math.cos(r2) * tx + s_ * math.sin(r2) * bx + c * nx
+        dy = s_ * math.cos(r2) * ty + s_ * math.sin(r2) * by + c * ny
+        dz = s_ * math.cos(r2) * tz + s_ * math.sin(r2) * bz + c * nz
+        t, m = march(qx0, qy0, qz0, dx, dy, dz, 40.0)
+        if m == 0 or m == M_GLASS: continue
+        qx = qx0 + dx * t; qy = qy0 + dy * t; qz = qz0 + dz * t
+        if water_h(qx, qy) &lt; 0.0 or hp &lt; 0.0: continue
+        nx, ny, nz = normal(qx, qy, qz, 1.0)
+        ar, ag, ab, f0r, f0g, f0b, ro, sx, sy, sz = material(qx, qy, qz, nx, ny, nz, m, 1.0)
+        VP[k, 0] = qx + nx * 0.01; VP[k, 1] = qy + ny * 0.01; VP[k, 2] = qz + nz * 0.01
+        VN[k, 0] = nx; VN[k, 1] = ny; VN[k, 2] = nz
+        VC[k, 0] = fr * ar / math.pi; VC[k, 1] = fg * ag / math.pi; VC[k, 2] = fb * ab / math.pi
+        VR[k] = 0.9 ** 2
+        k += 1
+    return VP[:k], VN[:k], VC[:k], VR[:k]
+
+
+@njit(**NJ)
+def irradiance(px, py, pz, nx, ny, nz, VP, VN, VC, VR):
+    &quot;&quot;&quot;light arriving at a point from the small lamps, with shadows.&quot;&quot;&quot;
+    er = 0.0; eg = 0.0; eb = 0.0
+    qx = px + nx * 0.004; qy = py + ny * 0.004; qz = pz + nz * 0.004
+    for i in range(VP.shape[0]):
+        lx = VP[i, 0] - qx; ly = VP[i, 1] - qy; lz = VP[i, 2] - qz
+        r2 = lx * lx + ly * ly + lz * lz; r = math.sqrt(r2)
+        cx = (nx * lx + ny * ly + nz * lz) / r
+        if cx &lt;= 0.0: continue
+        ci = -(VN[i, 0] * lx + VN[i, 1] * ly + VN[i, 2] * lz) / r
+        if ci &lt;= 0.0: continue
+        g = ci * cx / max(r2, VR[i])
+        if g * (VC[i, 0] + VC[i, 1] + VC[i, 2]) &lt; 2e-6: continue
+        if occl(qx, qy, qz, lx / r, ly / r, lz / r, r - 0.012): continue
+        er += VC[i, 0] * g; eg += VC[i, 1] * g; eb += VC[i, 2] * g
+    hp = water_h(px, py)
+    if hp &lt; 0.0:
+        er *= math.exp(1.5 * SIG_R * hp); eg *= math.exp(1.5 * SIG_G * hp); eb *= math.exp(1.5 * SIG_B * hp)
+    return er, eg, eb
+
+
+GNX, GNY, GNZ = 12, 20, 26
+GX0, GY0, GZ0 = XL + 0.12, YB + 0.12, ZF + 0.12
+GDX, GDY, GDZ = (XR - XL - 0.24) / (GNX - 1), (YT - YB - 0.24) / (GNY - 1), (ZB - ZF - 0.24) / (GNZ - 1)
+
+@njit(parallel=True, **NJ)
+def make_grid(VP, VN, VC, VR):
+    &quot;&quot;&quot;a coarse lattice of the bounced light, for six facings; used for what is seen in reflections.&quot;&quot;&quot;
+    G = np.zeros((GNX, GNY, GNZ, 6, 3)); GV = np.zeros((GNX, GNY, GNZ))
+    for i in prange(GNX):
+        for j in range(GNY):
+            for k in range(GNZ):
+                x = GX0 + i * GDX; y = GY0 + j * GDY; z = GZ0 + k * GDZ
+                if scene(x, y, z)[0] &lt; 0.03: continue
+                GV[i, j, k] = 1.0
+                for f in range(6):
+                    nx = 0.0; ny = 0.0; nz = 0.0
+                    if f == 0: nx = 1.0
+                    elif f == 1: nx = -1.0
+                    elif f == 2: ny = 1.0
+                    elif f == 3: ny = -1.0
+                    elif f == 4: nz = 1.0
+                    else: nz = -1.0
+                    r, g, b = irradiance(x, y, z, nx, ny, nz, VP, VN, VC, VR)
+                    G[i, j, k, f, 0] = r; G[i, j, k, f, 1] = g; G[i, j, k, f, 2] = b
+    return G, GV
+
+@njit(**NJ)
+def grid_irr(G, GV, x, y, z, nx, ny, nz):
+    x += nx * 0.15; y += ny * 0.15; z += nz * 0.15
+    fx = min(max((x - GX0) / GDX, 0.0), GNX - 1.001); fy = min(max((y - GY0) / GDY, 0.0), GNY - 1.001)
+    fz = min(max((z - GZ0) / GDZ, 0.0), GNZ - 1.001)
+    i = int(fx); j = int(fy); k = int(fz); fx -= i; fy -= j; fz -= k
+    a0 = 0 if nx &gt; 0 else 1; a1 = 2 if ny &gt; 0 else 3; a2 = 4 if nz &gt; 0 else 5
+    w0 = nx * nx; w1 = ny * ny; w2 = nz * nz
+    r = 0.0; g = 0.0; b = 0.0; ws = 0.0
+    for di in range(2):
+        wi = fx if di == 1 else 1 - fx
+        for dj in range(2):
+            wj = fy if dj == 1 else 1 - fy
+            for dk in range(2):
+                wk = fz if dk == 1 else 1 - fz
+                w = wi * wj * wk * GV[i + di, j + dj, k + dk]
+                if w &lt;= 0.0: continue
+                c = G[i + di, j + dj, k + dk]
+                r += w * (w0 * c[a0, 0] + w1 * c[a1, 0] + w2 * c[a2, 0])
+                g += w * (w0 * c[a0, 1] + w1 * c[a1, 1] + w2 * c[a2, 1])
+                b += w * (w0 * c[a0, 2] + w1 * c[a1, 2] + w2 * c[a2, 2])
+                ws += w
+    if ws &lt; 1e-4: return 0.0, 0.0, 0.0
+    return r / ws, g / ws, b / ws
+
+
+# ------------------------------------------------------------------ the water as an optical surface
+@njit(**NJ)
+def water_normal(x, z):
+    &quot;&quot;&quot;it is still, not polished: the surface moves by a few tenths of a millimetre.&quot;&quot;&quot;
+    e = 0.02
+    h0 = fbm3(x * 1.4, 2.0, z * 1.4, 2)
+    gx = (fbm3((x + e) * 1.4, 2.0, z * 1.4, 2) - h0) / e; gz = (fbm3(x * 1.4, 2.0, (z + e) * 1.4, 2) - h0) / e
+    a = 0.0016
+    nx = WNX - a * gx; ny = WNY; nz = -a * gz
+    l = math.sqrt(nx * nx + ny * ny + nz * nz)
+    return nx / l, ny / l, nz / l
+
+@njit(**NJ)
+def fresnel(c):
+    n = 1.333
+    s2 = (1.0 - c * c) / (n * n)
+    if s2 &gt;= 1.0: return 1.0
+    ct = math.sqrt(1.0 - s2)
+    rs = (c - n * ct) / (c + n * ct); rp = (n * c - ct) / (n * c + ct)
+    return 0.5 * (rs * rs + rp * rp)
+
+@njit(**NJ)
+def refract(dx, dy, dz, nx, ny, nz):
+    c = -(dx * nx + dy * ny + dz * nz); eta = 1.0 / 1.333
+    k = 1.0 - eta * eta * (1.0 - c * c)
+    a = eta * c - math.sqrt(max(k, 0.0))
+    return eta * dx + a * nx, eta * dy + a * ny, eta * dz + a * nz
+
+
+# ------------------------------------------------------------------ the bounce, measured on a coarser raster
+@njit(**NJ)
+def cam_ray(fx, fy, W, H):
+    u = (fx / W * 2.0 - 1.0) * TU
+    v = VTOP - fy / H * (VTOP - VBOT)
+    l = math.sqrt(u * u + v * v + 1.0)
+    return u / l, v / l, 1.0 / l
+
+@njit(parallel=True, **NJ)
+def bounce_pass(W, H, nx_, ny_, step, VP, VN, VC, VR, layer):
+    &quot;&quot;&quot;layer 0: what the lens sees.  layer 1: what it sees mirrored in the water.  layer 2: what it sees through the water.&quot;&quot;&quot;
+    BP = np.zeros((ny_, nx_, 3), np.float32); BN = np.zeros((ny_, nx_, 3), np.float32)
+    BE = np.zeros((ny_, nx_, 3), np.float32)
+    for iy in prange(ny_):
+        for ix in range(nx_):
+            BP[iy, ix, 0] = 1e6
+            dx, dy, dz = cam_ray((ix + 0.5) * step, (iy + 0.5) * step, W, H)
+            t, m = trace(CAMX, CAMY, 0.0, dx, dy, dz, 40.0)
+            if m == 0 or m == M_GLASS: continue
+            px = CAMX + dx * t; py = CAMY + dy * t; pz = dz * t
+            if layer == 0:
+                if m == M_WATER: continue
+            else:
+                if m != M_WATER: continue
+                if layer == 1:
+                    c = dx * WNX + dy * WNY
+                    dx -= 2 * c * WNX; dy -= 2 * c * WNY
+                    px += WNX * 0.003; py += WNY * 0.003
+                else:
+                    dx, dy, dz = refract(dx, dy, dz, WNX, WNY, 0.0)
+                    px -= WNX * 0.003; py -= WNY * 0.003
+                t2, m = march(px, py, pz, dx, dy, dz, 30.0)
+                if m == 0 or m == M_GLASS: continue
+                px += dx * t2; py += dy * t2; pz += dz * t2; t += t2
+            nx, ny, nz = normal(px, py, pz, t)
+            r, g, b = irradiance(px, py, pz, nx, ny, nz, VP, VN, VC, VR)
+            BP[iy, ix, 0] = px; BP[iy, ix, 1] = py; BP[iy, ix, 2] = pz
+            BN[iy, ix, 0] = nx; BN[iy, ix, 1] = ny; BN[iy, ix, 2] = nz
+            BE[iy, ix, 0] = r; BE[iy, ix, 1] = g; BE[iy, ix, 2] = b
+    return BP, BN, BE
+
+@njit(**NJ)
+def bounce_at(BP, BN, BE, fx, fy, px, py, pz, nx, ny, nz, t):
+    &quot;&quot;&quot;bounced light at a full-size sample, from the coarse raster, taking only neighbours on the same surface.&quot;&quot;&quot;
+    h, w = BE.shape[0], BE.shape[1]
+    x0 = int(math.floor(fx - 0.5)); y0 = int(math.floor(fy - 0.5))
+    sd = 0.0015 + 0.0012 * t
+    r = 0.0; g = 0.0; b = 0.0; ws = 0.0
+    for a in range(-1, 3):
+        yy = y0 + a
+        if yy &lt; 0 or yy &gt;= h: continue
+        for c in range(-1, 3):
+            xx = x0 + c
+            if xx &lt; 0 or xx &gt;= w: continue
+            if BP[yy, xx, 0] &gt; 1e5: continue
+            nn = nx * BN[yy, xx, 0] + ny * BN[yy, xx, 1] + nz * BN[yy, xx, 2]
+            if nn &lt; 0.85: continue
+            pd = abs((BP[yy, xx, 0] - px) * nx + (BP[yy, xx, 1] - py) * ny + (BP[yy, xx, 2] - pz) * nz)
+            ddx = xx + 0.5 - fx; ddy = yy + 0.5 - fy
+            wg = math.exp(-(pd / sd) ** 2) * math.exp(-(ddx * ddx + ddy * ddy) / 0.7) * nn ** 8
+            r += wg * BE[yy, xx, 0]; g += wg * BE[yy, xx, 1]; b += wg * BE[yy, xx, 2]; ws += wg
+    if ws &lt; 1e-3:
+        return False, 0.0, 0.0, 0.0
+    return True, r / ws, g / ws, b / ws
+
+
+# ------------------------------------------------------------------ the exposure
+@njit(**NJ)
+def plain(ox, oy, oz, dx, dy, dz, tt, G, GV, AMB, emit, q, Q, rot, pa):
+    &quot;&quot;&quot;what a glossy surface sees along one reflected ray: lit by the lamps and the lattice, no further gloss.&quot;&quot;&quot;
+    t, m = trace(ox, oy, oz, dx, dy, dz, 40.0)
+    if m == 0: return 0.0, 0.0, 0.0
+    px = ox + dx * t; py = oy + dy * t; pz = oz + dz * t
+    k = 1.0
+    if m == M_WATER:                                         # water seen in paint: follow its mirror once
+        c = -(dx * WNX + dy * WNY); k = fresnel(c)
+        dx += 2 * c * WNX; dy += 2 * c * WNY
+        px += WNX * 0.003; py += WNY * 0.003
+        t2, m = march(px, py, pz, dx, dy, dz, 30.0)
+        if m == 0: return 0.0, 0.0, 0.0
+        px += dx * t2; py += dy * t2; pz += dz * t2; t += t2
+    if m == M_GLASS:
+        if emit: return k * LGR, k * LGG, k * LGB
+        return 0.0, 0.0, 0.0
+    hx, hy, hz = normal(px, py, pz, tt + t)
+    ar, ag, ab, f0r, f0g, f0b, ro, nx, ny, nz = material(px, py, pz, hx, hy, hz, m, (tt + t) * pa * 3.0)
+    er, eg, eb, sr, sg, sb = lamps_at(px + hx * 0.003, py + hy * 0.003, pz + hz * 0.003, nx, ny, nz, dx, dy, dz, 1.0, q, Q, rot)
+    ir, ig, ib = grid_irr(G, GV, px, py, pz, hx, hy, hz)
+    if f0r &gt; 0.5:
+        return k * f0r * (er + ir) / math.pi, k * f0g * (eg + ig) / math.pi, k * f0b * (eb + ib) / math.pi
+    return k * ar * (er + ir + AMB[0]) / math.pi, k * ag * (eg + ig + AMB[1]) / math.pi, k * ab * (eb + ib + AMB[2]) / math.pi
+
+
+@njit(**NJ)
+def second(px, py, pz, t, m, dx, dy, dz, fx, fy, BP, BN, BE, G, GV, AMB, q, Q, rot, pa):
+    &quot;&quot;&quot;a surface met after the water: mirrored in it, or lying under it.&quot;&quot;&quot;
+    if m == 0: return 0.0, 0.0, 0.0
+    if m == M_GLASS: return LGR, LGG, LGB
+    gx, gy, gz = normal(px, py, pz, t)
+    ar, ag, ab, f0r, f0g, f0b, ro, nx, ny, nz = material(px, py, pz, gx, gy, gz, m, t * pa * 1.5)
+    er, eg, eb, sr, sg, sb = lamps_at(px + gx * 0.003, py + gy * 0.003, pz + gz * 0.003, nx, ny, nz, dx, dy, dz, ro, q, Q, rot)
+    ok, ir, ig, ib = bounce_at(BP, BN, BE, fx, fy, px, py, pz, gx, gy, gz, t)
+    if not ok:
+        ir, ig, ib = grid_irr(G, GV, px, py, pz, gx, gy, gz)
+    if f0r &gt; 0.5:
+        return f0r * (er + ir) / math.pi + f0r * sr, f0g * (eg + ig) / math.pi + f0g * sg, f0b * (eb + ib) / math.pi + f0b * sb
+    lr = ar * (er + ir + AMB[0]) / math.pi; lg = ag * (eg + ig + AMB[1]) / math.pi; lb = ab * (eb + ib + AMB[2]) / math.pi
+    if ro &lt; 0.6 and f0r &gt; 0.0:
+        c1 = 1.0 - min(max(-(dx * nx + dy * ny + dz * nz), 0.0), 1.0)
+        F = f0r + (1 - f0r) * c1 ** 5 * max(1.0 - 1.5 * ro, 0.0)
+        lr = lr * (1 - F) + F * sr; lg = lg * (1 - F) + F * sg; lb = lb * (1 - F) + F * sb
+    return lr, lg, lb
+
+
+@njit(parallel=True, **NJ)
+def expose(W, H, SS, step, BP, BN, BE, RP, RN, RE, UP, UN, UE, G, GV, AMB, seed):
+    img = np.zeros((H, W, 3), np.float32)
+    N = SS * SS
+    pa = 2.0 * TU / W
+    for iy in prange(H):
+        for ix in range(W):
+            pr = hash3(ix, iy, seed) * 6.2831853; pr2 = hash3(ix, iy, seed + 7) * 6.2831853
+            sh = int(hash3(ix, iy, seed + 3) * N)
+            cr = 0.0; cg = 0.0; cb = 0.0
+            for s in range(N):
+                sa = s // SS; sb_ = s % SS
+                fx = ix + (sa + hash3(ix * 4 + sa, iy * 4 + sb_, seed + 11)) / SS
+                fy = iy + (sb_ + hash3(ix * 4 + sa, iy * 4 + sb_, seed + 13)) / SS
+                dx, dy, dz = cam_ray(fx, fy, W, H)
+                t, m = trace(CAMX, CAMY, 0.0, dx, dy, dz, 40.0)
+                if m == 0: continue
+                px = CAMX + dx * t; py = CAMY + dy * t; pz = dz * t
+                q = (s * 7 + sh) % N
+                if m == M_GLASS:
+                    cr += LGR; cg += LGG; cb += LGB
+                    continue
+                if m == M_WATER:
+                    wx, wy, wz = water_normal(px, pz)
+                    c = -(dx * wx + dy * wy + dz * wz)
+                    F = fresnel(c)
+                    # mirrored
+                    rx = dx + 2 * c * wx; ry = dy + 2 * c * wy; rz = dz + 2 * c * wz
+                    ox = px + WNX * 0.003; oy = py + WNY * 0.003
+                    t2, m2 = march(ox, oy, pz, rx, ry, rz, 30.0)
+                    ar_, ag_, ab_ = second(ox + rx * t2, oy + ry * t2, pz + rz * t2, t + t2, m2, rx, ry, rz, fx / step, fy / step,
+                                           RP, RN, RE, G, GV, AMB, q, N, pr, pa)
+                    # seen through
+                    tx, ty, tz = refract(dx, dy, dz, wx, wy, wz)
+                    ox = px - WNX * 0.003; oy = py - WNY * 0.003
+                    t3, m3 = march(ox, oy, pz, tx, ty, tz, 12.0)
+                    er, eg, eb, sr, sg, sb = lamps_at(px + WNX * 0.004, py + WNY * 0.004, pz, WNX, WNY, 0.0, dx, dy, dz, 1.0, q, N, pr)
+                    ir, ig, ib = grid_irr(G, GV, px, py + 0.1, pz, 0.0, 1.0, 0.0)
+                    er += ir; eg += ig; eb += ib
+                    if m3 == 0:
+                        t3 = 12.0; br = 0.0; bg = 0.0; bb = 0.0
+                    else:
+                        br, bg, bb = second(ox + tx * t3, oy + ty * t3, pz + tz * t3, t + t3, m3, tx, ty, tz, fx / step, fy / step,
+                                            UP, UN, UE, G, GV, AMB, q, N, pr, pa)
+                    a1 = math.exp(-SIG_R * t3); a2 = math.exp(-SIG_G * t3); a3 = math.exp(-SIG_B * t3)
+                    br = br * a1 + 0.020 * er / math.pi * (1 - a1)           # what is in the water scatters a little of the lamp back
+                    bg = bg * a2 + 0.030 * eg / math.pi * (1 - a2)
+                    bb = bb * a3 + 0.022 * eb / math.pi * (1 - a3)
+                    lr = F * ar_ + (1 - F) * br; lg = F * ag_ + (1 - F) * bg; lb = F * ab_ + (1 - F) * bb
+                    # what floats: a skin of dust gathered along the walls, a few specks, the wetted line itself
+                    ds = scene(px, py - 0.004, pz)[0]
+                    sc = 0.30 * math.exp(-ds / 0.20) * sstep(0.45, 0.75, fbm3(px * 3.1, 5.0, pz * 3.1, 3))
+                    sc += 0.30 * math.exp(-ds / 0.012) * (0.4 + 0.6 * noise3(px * 31.0, 1.0, pz * 31.0))
+                    ci = int(math.floor(px / 0.012)); cj = int(math.floor(pz / 0.012))
+                    if hash3(ci, 81, cj) &lt; 0.0022:
+                        ex = px / 0.012 - ci - 0.5; ez = pz / 0.012 - cj - 0.5
+                        if ex * ex + ez * ez &lt; 0.02 + 0.12 * hash3(ci, 83, cj): sc += 0.6
+                    sc = min(sc, 0.85)
+                    lr = lr * (1 - sc) + sc * 0.36 * er / math.pi; lg = lg * (1 - sc) + sc * 0.34 * eg / math.pi
+                    lb = lb * (1 - sc) + sc * 0.28 * eb / math.pi
+                    cr += lr; cg += lg; cb += lb
+                    continue
+                gx, gy, gz = normal(px, py, pz, t)
+                fp = t * pa / max(-(gx * dx + gy * dy + gz * dz), 0.05)
+                ar, ag, ab, f0r, f0g, f0b, ro, nx, ny, nz = material(px, py, pz, gx, gy, gz, m, fp)
+                er, eg, eb, sr, sg, sb = lamps_at(px + gx * 0.003, py + gy * 0.003, pz + gz * 0.003, nx, ny, nz, dx, dy, dz, ro, q, N, pr)
+                ok, ir, ig, ib = bounce_at(BP, BN, BE, fx / step, fy / step, px, py, pz, gx, gy, gz, t)
+                if not ok:
+                    ir, ig, ib = grid_irr(G, GV, px, py, pz, gx, gy, gz)
+                occ = 0.0; sca = 1.0
+                for k in range(4):
+                    hh = 0.02 + 0.09 * k
+                    occ += (hh - scene(px + gx * hh, py + gy * hh, pz + gz * hh)[0]) * sca; sca *= 0.7
+                ao = min(max(1.0 - 1.6 * occ, 0.0), 1.0)
+                er += ir + AMB[0] * ao; eg += ig + AMB[1] * ao; eb += ib + AMB[2] * ao
+                lr = ar * er / math.pi; lg = ag * eg / math.pi; lb = ab * eb / math.pi
+                # gloss
+                if f0r &gt; 0.0 and ro &lt; 0.6:
+                    vn = dx * nx + dy * ny + dz * nz
+                    c1 = 1.0 - min(max(-vn, 0.0), 1.0)
+                    fk = c1 ** 5 * max(1.0 - 1.5 * ro, 0.0)
+                    Fr = f0r + (1 - f0r) * fk; Fg = f0g + (1 - f0g) * fk; Fb = f0b + (1 - f0b) * fk
+                    qr = 0.0; qg = 0.0; qb = 0.0
+                    if ro &lt; 0.4:
+                        mx0 = dx - 2 * vn * nx; my0 = dy - 2 * vn * ny; mz0 = dz - 2 * vn * nz
+                        if abs(my0) &lt; 0.9: tx = -mz0; ty = 0.0; tz = mx0            # two directions across the mirror direction
+                        else: tx = 1.0; ty = 0.0; tz = 0.0
+                        tl = math.sqrt(tx * tx + ty * ty + tz * tz); tx /= tl; ty /= tl; tz /= tl
+                        bx = my0 * tz - mz0 * ty; by = mz0 * tx - mx0 * tz; bz = mx0 * ty - my0 * tx
+                        ox = px + gx * 0.003; oy = py + gy * 0.003; oz = pz + gz * 0.003
+                        NR = 3 if ro &gt; 0.1 else 2
+                        for k in range(NR):
+                            s3 = ((s * 11 + sh * 3 + 5) % N) * NR + k
+                            u = (s3 + hash3(ix + k * 131, iy + s, seed + 17)) / (N * NR)
+                            rr = ro * 0.55 * math.sqrt(-math.log(1.0 - 0.96 * u)); th = 2.39996323 * s3 + pr2
+                            rx = mx0 + rr * (math.cos(th) * tx + math.sin(th) * bx); ry = my0 + rr * (math.cos(th) * ty + math.sin(th) * by)
+                            rz = mz0 + rr * (math.cos(th) * tz + math.sin(th) * bz)
+                            rl = math.sqrt(rx * rx + ry * ry + rz * rz); rx /= rl; ry /= rl; rz /= rl
+                            gn = rx * gx + ry * gy + rz * gz
+                            if gn &lt; 0.01:
+                                rx += (0.01 - gn) * gx; ry += (0.01 - gn) * gy; rz += (0.01 - gn) * gz
+                                rl = math.sqrt(rx * rx + ry * ry + rz * rz); rx /= rl; ry /= rl; rz /= rl
+                            ur, ug, ub = plain(ox, oy, oz, rx, ry, rz, t, G, GV, AMB, ro &lt; 0.03, (q + k * 5) % N, N, pr2, pa)
+                            qr += ur; qg += ug; qb += ub
+                        qr /= NR; qg /= NR; qb /= NR
+                    else:
+                        qr = lr; qg = lg; qb = lb                                    # too rough to mirror anything: only the lamps&#x27; sheen
+                    if ro &gt;= 0.03:
+                        qr += sr; qg += sg; qb += sb
+                    lr = lr * (1 - Fr) + Fr * qr; lg = lg * (1 - Fg) + Fg * qg; lb = lb * (1 - Fb) + Fb * qb
+                cr += lr; cg += lg; cb += lb
+            img[iy, ix, 0] = cr / N; img[iy, ix, 1] = cg / N; img[iy, ix, 2] = cb / N
+    return img
+
+
+# ------------------------------------------------------------------ the print
+def develop(lin, scale, rng, exposure):
+    &quot;&quot;&quot;lens, then a restrained curve, then grain.&quot;&quot;&quot;
+    H, W = lin.shape[:2]
+    lin = lin * exposure
+    # the lens: a little softness, a little veiling light, falloff about the axis (which is at eye height, not mid-frame)
+    soft = np.stack([gaussian_filter(lin[..., c], 0.55 * scale) for c in range(3)], -1)
+    veil = np.stack([gaussian_filter(np.minimum(lin[..., c], 40.0), 0.045 * W) for c in range(3)], -1)
+    halo = np.stack([gaussian_filter(np.minimum(lin[..., c], 40.0), 3.5 * scale) for c in range(3)], -1)
+    glow = np.stack([gaussian_filter(np.minimum(lin[..., c], 40.0), 14.0 * scale) for c in range(3)], -1)
+    haze = np.stack([gaussian_filter(np.minimum(lin[..., c], 40.0), 48.0 * scale) for c in range(3)], -1)   # sea air round the lamp
+    lin = soft * 0.951 + halo * 0.022 + glow * 0.012 + haze * 0.006 + veil * 0.009
+    u = ((np.arange(W) + 0.5) / W * 2 - 1) * TU
+    v = VTOP - (np.arange(H) + 0.5) / H * (VTOP - VBOT)
+    c4 = 1.0 / (1.0 + u[None, :] ** 2 + v[:, None] ** 2) ** 2
+    lin = lin * (1.0 - 0.30 * (1.0 - c4))[..., None]
+    # the curve
+    wp = 9.0
+    f = lambda x: x * (1.0 + x / wp ** 2) / (1.0 + x)
+    L = (0.2126 * lin[..., 0] + 0.7152 * lin[..., 1] + 0.0722 * lin[..., 2])[..., None]
+    y = 0.6 * lin * (f(L) / np.maximum(L, 1e-9)) + 0.4 * f(lin)             # mostly by brightness, so lit paint keeps its colour
+    y = np.clip(y, 0.0, 1.0)
+    y = np.where(y &lt;= 0.0031308, 12.92 * y, 1.055 * np.power(np.maximum(y, 1e-9), 1 / 2.4) - 0.055)
+    y = y + 0.20 * (y * y * (3 - 2 * y) - y)                                  # a slight S
+    # grain: fine, strongest in the middle tones
+    g = gaussian_filter(rng.standard_normal((H, W)), 0.55 * max(scale, 0.5)); g /= g.std()
+    gc = np.stack([gaussian_filter(rng.standard_normal((H, W)), 0.55 * max(scale, 0.5)) for _ in range(3)], -1); gc /= gc.std()
+    lum = y.mean(-1, keepdims=True)
+    amp = 0.003 + 0.008 * np.sqrt(np.clip(4 * lum * (1 - lum), 0, 1))
+    y = y + amp * (0.8 * g[..., None] + 0.35 * gc)
+    return np.clip(y, 0, 1)
+
+
+def stamp(img, rng):
+    &quot;&quot;&quot;H.M.Q. / 25:00, violet stamp-pad ink, a little dry, a few degrees off level, lower left.&quot;&quot;&quot;
+    H, W = img.shape[:2]
+    fs = max(int(round(min(H, W) * 0.027)), 9)
+    font = ImageFont.truetype(&#x27;/usr/share/fonts/opentype/urw-base35/NimbusMonoPS-Bold.otf&#x27;, fs)
+    cw, chh = int(fs * 4.7), int(fs * 2.95)
+    im = Image.new(&#x27;L&#x27;, (cw, chh), 0); d = ImageDraw.Draw(im)
+    bw = max(int(round(fs * 0.085)), 1)
+    d.rounded_rectangle([bw, bw, cw - bw - 1, chh - bw - 1], radius=int(fs * 0.22), outline=255, width=bw)
+    for k, s in enumerate((&#x27;H.M.Q.&#x27;, &#x27;25:00&#x27;)):
+        l = d.textlength(s, font=font)
+        d.text(((cw - l) / 2, fs * (0.34 + 1.12 * k)), s, fill=255, font=font)
+    im = im.rotate(4.2, resample=Image.BICUBIC, expand=True)
+    m = np.asarray(im, np.float64) / 255.0
+    h, w = m.shape
+    # rubber: ink gathers at the edge of each letter, starves in the middle of it
+    inner = gaussian_filter(m, fs * 0.055)
+    dens = m * (0.62 + 0.75 * (1.0 - inner))
+    # uneven pressure across the stamp, one corner hardly touching
+    press = gaussian_filter(rng.standard_normal((h, w)), fs * 0.9); press = press / (np.abs(press).max() + 1e-9)
+    yy, xx = np.mgrid[0:h, 0:w]
+    corner = np.clip(1.25 - 1.05 * np.clip((xx / w - 0.45) / 0.55, 0, 1) * np.clip((0.75 - yy / h) / 0.75 + 0.35, 0, 1), 0.12, 1)
+    dens *= np.clip(0.80 + 0.45 * press, 0.2, 1.1) * corner
+    # the pad was a little dry: small misses where the rubber met no ink
+    dry = gaussian_filter(rng.standard_normal((h, w)), fs * 0.028); dry /= dry.std()
+    miss = np.clip((dry - 0.75 + 1.2 * (1 - corner)) / 0.6, 0, 1)
+    dens *= 1.0 - 0.75 * miss
+    dens = gaussian_filter(dens, fs * 0.022)
+    dens = np.clip(dens * 1.15, 0, 1) * 0.86
+    ink = np.array([0.36, 0.20, 0.60])
+    x0 = int(W * 0.050); y0 = H - int(W * 0.050) - h
+    reg = img[y0:y0 + h, x0:x0 + w]
+    out = reg * (1.0 - dens[..., None] * (1.0 - ink))                         # ink absorbs
+    out = out + dens[..., None] * 0.46 * (ink * 0.9 - out) * np.clip((0.55 - reg.mean(-1, keepdims=True)) / 0.3, 0, 1)   # and sits on the surface in the darks
+    img[y0:y0 + h, x0:x0 + w] = out
+    return img
+
+
+EXPOSURE = 10.5
+
+def main():
+    scale = float(sys.argv[1]) if len(sys.argv) &gt; 1 else 1.0
+    out = sys.argv[2] if len(sys.argv) &gt; 2 else __file__.replace(&#x27;.py&#x27;, &#x27;.png&#x27;)
+    W = int(round(2400 * scale)); H = int(round(3000 * scale))
+    SS = 4 if scale &gt;= 0.99 else 3
+    if len(sys.argv) &gt; 3: SS = int(sys.argv[3])
+    rng = np.random.default_rng(SEED)
+    t0 = time.time()
+    VP, VN, VC, VR = make_lamps(520, 260, 260)
+    area = 2 * ((XR - XL) * (ZB - ZF) + (XR - XL) * (YT - YB) + (ZB - ZF) * (YT - YB))
+    AMB = VC[VR &gt; 0.5].sum(0) * math.pi * 0.40 / (area * (1 - 0.40))                    # what is left after the second flight, spread evenly
+    print(&#x27;lamps&#x27;, VP.shape[0], &#x27;ambient&#x27;, AMB, flush=True)
+    G, GV = make_grid(VP, VN, VC, VR)
+    print(&#x27;lattice %.0fs&#x27; % (time.time() - t0), flush=True)
+    step = max(W / 340.0, 2.0)                                                          # the bounce changes slowly; 340 measurements across is enough
+    nx_, ny_ = int(math.ceil(W / step)), int(math.ceil(H / step))
+    BP, BN, BE = bounce_pass(W, H, nx_, ny_, float(step), VP, VN, VC, VR, 0)
+    RP, RN, RE = bounce_pass(W, H, nx_, ny_, float(step), VP, VN, VC, VR, 1)
+    UP, UN, UE = bounce_pass(W, H, nx_, ny_, float(step), VP, VN, VC, VR, 2)
+    print(&#x27;bounce %.0fs&#x27; % (time.time() - t0), flush=True)
+    lin = expose(W, H, SS, float(step), BP, BN, BE, RP, RN, RE, UP, UN, UE, G, GV, AMB, SEED % 1000)
+    print(&#x27;exposed %.0fs&#x27; % (time.time() - t0), flush=True)
+    if &#x27;--keep&#x27; in sys.argv: np.save(out.replace(&#x27;.png&#x27;, &#x27;_lin.npy&#x27;), lin)
+    img = develop(lin.astype(np.float64), scale, rng, EXPOSURE)
+    img = stamp(img, rng)
+    Image.fromarray((img * 255 + rng.random(img.shape)).clip(0, 255).astype(np.uint8)).save(out)
+    print(&#x27;saved&#x27;, out, &#x27;%.0fs&#x27; % (time.time() - t0), flush=True)
+
+
+if __name__ == &#x27;__main__&#x27;:
+    main()
+</pre>
+</main>
+<footer class="foot"><p>Antara. Winter programme, 12 November 2026 to 28 February 2027.</p></footer>
+</body>
+</html>
