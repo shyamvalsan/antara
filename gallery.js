@@ -1,9 +1,11 @@
 // Antara: the building, the hang, walking, and the audio guide.
 // Everything is laid out from the programme data embedded in the page.
 import * as THREE from 'three';
+import { configure, loadHearts, heartButton, heartBadge, mountGuestbook, showStats } from './community.js';
 
 const D = JSON.parse(document.getElementById('data').textContent);
 const $ = id => document.getElementById(id);
+configure(D.api);
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const mmss = s => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}`;
 const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
@@ -335,6 +337,32 @@ function buildRoom(R) {
   so.rotation.x = Math.PI / 2; so.position.set(side * (NW / 2 + T / 2), DH, zc); world.add(so);
 }
 
+// The guest book, open on a lectern near the entrance. A click on it opens the book.
+const LECT = { x: 1.9, z: 6.9, yaw: -0.7 };
+function buildLectern() {
+  const g = new THREE.Group(); g.position.set(LECT.x, 0, LECT.z); g.rotation.y = LECT.yaw;
+  const wood = new THREE.MeshBasicMaterial({ color: '#4A3A2E' }), woodTop = new THREE.MeshBasicMaterial({ color: '#5C4a3B' });
+  const part = (to, geo, mat, x, y, z) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); to.add(m); return m; };
+  part(g, new THREE.BoxGeometry(0.52, 0.06, 0.44), wood, 0, 0.03, 0);            // foot
+  part(g, new THREE.BoxGeometry(0.3, 0.92, 0.22), wood, 0, 0.51, 0);             // stem
+  const desk = new THREE.Group(); desk.position.set(0, 1.02, 0); desk.rotation.x = 0.42;   // sloped top, facing the visitor (+z)
+  g.add(desk);
+  part(desk, new THREE.BoxGeometry(0.64, 0.05, 0.46), woodTop, 0, 0, 0);
+  part(desk, new THREE.BoxGeometry(0.64, 0.045, 0.05), wood, 0, 0.03, 0.21);     // the lip that keeps the book from sliding
+  // the open book: pale leaves on a dark cover
+  const c = document.createElement('canvas'); c.width = 512; c.height = 360; const x = c.getContext('2d');
+  x.fillStyle = '#EDE6D4'; x.fillRect(0, 0, 512, 360);
+  x.fillStyle = 'rgba(60,50,40,.16)'; x.fillRect(250, 0, 12, 360);
+  x.fillStyle = '#3A3128'; x.font = '34px Marcellus, serif'; x.textAlign = 'center'; x.fillText('Guest book', 384, 60);
+  x.strokeStyle = 'rgba(58,49,40,.28)'; x.lineWidth = 2;
+  for (let i = 0; i < 6; i++) { const y = 104 + i * 40; x.beginPath(); x.moveTo(296, y); x.lineTo(470, y); x.stroke(); x.beginPath(); x.moveTo(40, y); x.lineTo(214, y); x.stroke(); }
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = MAXA;
+  const cover = new THREE.MeshBasicMaterial({ color: '#5B2F27' });
+  part(desk, new THREE.BoxGeometry(0.6, 0.012, 0.4), cover, 0, 0.031, -0.01);
+  part(desk, new THREE.BoxGeometry(0.54, 0.018, 0.36), [cover, cover, new THREE.MeshBasicMaterial({ map: tex }), cover, cover, cover], 0, 0.046, -0.01);
+  g.traverse(m => { if (m.isMesh) { m.userData.book = true; solids.push(m); } });
+  world.add(g);
+}
 let naveWork = null;
 function buildNave() {
   const lettering = (wall, r, alignRight) => ({
@@ -375,6 +403,7 @@ function buildNave() {
     { text: D.season, size: 0.3, lead: 1.5 }, { text: D.dates, size: 0.13, font: '"Albert Sans"', color: TXT2, lead: 2.6 },
     ...D.exhibitions.map(e => ({ text: `${e.artist}, ${e.title}`, size: 0.115, font: '"Albert Sans"', lead: 1.62 })),
     { text: '', size: 0.1 }, { text: `Hung by ${D.curator.name}`, size: 0.105, font: '"Albert Sans"', style: 'italic', color: TXT2 }] }] });
+  buildLectern();
   const edge = new THREE.MeshBasicMaterial({ color: dim('#D5D2CA', 0.3) });
   const box = new THREE.Mesh(new THREE.BoxGeometry(PW - 0.002, PH - 0.002, PT - 0.004), edge); box.position.set(0, PH / 2, PZ); world.add(box);
 }
@@ -394,7 +423,7 @@ function buildCollision() {
     const ds = [r.side * (NW / 2 - 0.6), r.side * (NW / 2 + T + 0.6)].sort((a, b) => a - b);
     walkable.push([ds[0], ds[1], r.zc - DW / 2 + RAD, r.zc + DW / 2 - RAD]);
   }
-  blocked = [[-PW / 2 - RAD, PW / 2 + RAD, PZ - PT / 2 - RAD, PZ + PT / 2 + RAD]];
+  blocked = [[-PW / 2 - RAD, PW / 2 + RAD, PZ - PT / 2 - RAD, PZ + PT / 2 + RAD], [LECT.x - 0.45 - RAD, LECT.x + 0.45 + RAD, LECT.z - 0.4 - RAD, LECT.z + 0.4 + RAD]];
 }
 const canStand = (x, z) => walkable.some(r => inRect(x, z, r)) && !blocked.some(r => inRect(x, z, r));
 const spaceOf = (x, z) => rooms.findIndex(r => Math.abs(x) > NW / 2 + T / 2 && Math.sign(x) === r.side && z <= r.z0 && z >= r.z1);
@@ -560,9 +589,48 @@ function closePanel(keepAudio) {
 $('p-close').addEventListener('click', () => closePanel(false));
 const btn = (text, fn, cls) => { const b = el('button', cls, text); b.type = 'button'; b.addEventListener('click', fn); return b; };
 
+// ---------------------------------------------------------------- sharing
+function shareCopy(url, b) {
+  const done = () => { b.textContent = 'Copied'; b.classList.add('ok'); setTimeout(() => { b.textContent = 'Copy link'; b.classList.remove('ok'); }, 2200); };
+  const old = () => { const t = document.createElement('textarea'); t.value = url; t.style.cssText = 'position:fixed;opacity:0'; document.body.append(t); t.select(); try { document.execCommand('copy'); done(); } catch { window.prompt('Copy this link', url); } t.remove(); };
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(url).then(done, old); else old();
+}
+function networks({ title, text, url }) {
+  const u = encodeURIComponent(url), t = encodeURIComponent(title);
+  return [['X', `https://x.com/intent/post?text=${t}&url=${u}`], ['Facebook', `https://www.facebook.com/sharer/sharer.php?u=${u}`],
+    ['WhatsApp', `https://wa.me/?text=${encodeURIComponent(title + ' ' + url)}`], ['LinkedIn', `https://www.linkedin.com/sharing/share-offsite/?url=${u}`],
+    ['Email', `mailto:?subject=${t}&body=${encodeURIComponent(text + '\n\n' + url)}`]];
+}
+// Returns [button, popover]. `get` gives {title, text, url} when asked. The system share sheet if there is one, else a small row of plain links.
+function sharer(get) {
+  const pop = el('div', 'sharepop'); pop.hidden = true;
+  const b = btn('Share', async () => {
+    const s = get();
+    if (navigator.share) { try { await navigator.share({ title: s.title, text: s.text, url: s.url }); } catch {} return; }
+    if (!pop.hidden) { pop.hidden = true; b.setAttribute('aria-expanded', 'false'); return; }
+    const copy = btn('Copy link', () => shareCopy(s.url, copy), 'link');
+    pop.replaceChildren(copy, ...networks(s).map(([n, h]) => { const a = el('a', null, n); a.href = h; a.target = '_blank'; a.rel = 'noopener noreferrer'; return a; }));
+    pop.hidden = false; b.setAttribute('aria-expanded', 'true');
+    requestAnimationFrame(() => { if (panel.contains(pop)) panel.scrollTo({ top: panel.scrollHeight, behavior: 'smooth' }); });
+  }, 'share');
+  b.setAttribute('aria-expanded', 'false');
+  return [b, pop];
+}
+const shareOf = {
+  work: rec => () => ({ title: `${rec.w.title}, ${rec.e.artist}: ${D.name}`, text: rec.w.blurb, url: D.url + rec.w.share }),
+  room: e => () => ({ title: `${e.artist}, ${e.title}: ${D.name}`, text: e.blurb, url: D.url + e.share }),
+  gallery: () => ({ title: `${D.name}: ${D.line}`, text: D.description, url: D.url }),
+};
+function setAddress(q) { try { history.replaceState(null, '', location.pathname + (q ? '?' + q : '') + location.hash); } catch {} }
+
 function codeLine(rec) {
   const c = rec.w.code, p = el('p', 'codeline', `Computed by one program, ${c.lines.toLocaleString('en-US')} lines of Python. `);
   p.append(btn('Read the code', () => openCode(rec), 'link'));
+  return p;
+}
+function noteLine(rec) {
+  const p = el('p', 'codeline');
+  p.append(btn('Leave a note about this work', () => openGuest(rec.w.id), 'link'));
   return p;
 }
 function showWork(rec) {
@@ -570,8 +638,9 @@ function showWork(rec) {
   body.replaceChildren(
     el('p', 'kicker', rec.e.artist), el('h2', null, rec.w.title),
     el('p', 'meta', `${rec.w.year}. ${rec.w.medium}. ${rec.w.cm[0]} × ${rec.w.cm[1]} cm`),
-    ...rec.w.story.map(t => el('p', null, t)), codeLine(rec));
-  acts.replaceChildren(btn('Look closer', () => openCloser(rec)));
+    ...rec.w.story.map(t => el('p', null, t)), codeLine(rec), noteLine(rec));
+  acts.replaceChildren(btn('Look closer', () => openCloser(rec)), heartButton(rec.w.id), ...sharer(shareOf.work(rec)));
+  setAddress('w=' + encodeURIComponent(rec.w.id));
   openPanel(rec.w.audio, true);
 }
 function showIntro(R) {
@@ -580,12 +649,15 @@ function showIntro(R) {
   more.append(el('h3', null, 'The artist'), el('p', 'meta', e.origin), ...e.bio.map(t => el('p', null, t)), ...e.said.map(t => el('blockquote', null, t)));
   body.replaceChildren(el('p', 'kicker', 'Exhibition'), el('h2', null, e.artist), el('p', 'sub', e.title), ...e.intro.map(t => el('p', null, t)), more);
   const b = btn('About the artist', () => { more.hidden = !more.hidden; b.textContent = more.hidden ? 'About the artist' : 'Hide'; });
-  acts.replaceChildren(b, btn('Go to the first work', () => nextStop(1)));
+  acts.replaceChildren(b, btn('Go to the first work', () => nextStop(1)), ...sharer(shareOf.room(e)));
+  setAddress('x=' + encodeURIComponent(e.slug));
   openPanel(e.audio, true);
 }
 function showWelcome() {
   body.replaceChildren(el('p', 'kicker', `${D.curator.name}, ${D.curator.role.toLowerCase()}`), el('h2', null, `Welcome to ${D.name}`), ...D.welcome.text.map(t => el('p', null, t)));
-  acts.replaceChildren(btn('Begin the guided walk', () => toStop(0)));
+  const about = el('a', null, 'About Antara'); about.href = 'about/';
+  acts.replaceChildren(btn('Begin the guided walk', () => toStop(0)), about, ...sharer(shareOf.gallery));
+  setAddress('');
   openPanel(D.welcome.audio, true);
 }
 
@@ -650,6 +722,7 @@ function buildPlan() {
   add('rect', { x: -PW / 2, y: PZ - PT / 2, width: PW, height: PT, class: 'title' });
   add('circle', { id: 'plan-me', r: 0.7, cx: 0, cy: 0 });
 }
+$('plan-share').replaceChildren(...sharer(shareOf.gallery));
 $('b-plan').addEventListener('click', () => { $('plan-me').setAttribute('cx', me.x); $('plan-me').setAttribute('cy', me.z); plan.showModal(); });
 plan.querySelector('[data-close]').addEventListener('click', () => plan.close());
 
@@ -699,7 +772,7 @@ function buildArtists() {
     for (const w of e.works) {
       const rec = works.find(q => q.w === w), t = el('button', 'ar-th'); t.type = 'button';
       t.setAttribute('aria-label', `${w.title}. Go to this work`);
-      const im = new Image(); im.src = w.t; im.alt = ''; im.loading = 'lazy'; im.decoding = 'async'; t.append(im, el('span', null, w.title));
+      const im = new Image(); im.src = w.t; im.alt = ''; im.loading = 'lazy'; im.decoding = 'async'; t.append(im, el('span', null, w.title), heartBadge(w.id));
       t.addEventListener('click', () => { artD.close(); if (rec) toStop(stops.findIndex(s => s.rec === rec)); });
       thumbs.append(t);
     }
@@ -726,6 +799,29 @@ function buildArtists() {
   });
   artD.querySelector('[data-close]').addEventListener('click', () => artD.close());
 }
+
+// ---------------------------------------------------------------- the guest book
+const gbD = $('guestbook');
+const titleOf = Object.fromEntries(D.exhibitions.flatMap(e => e.works.map(w => [w.id, w.title])));
+let gb = null;
+function openGuest(slug) {
+  if (!gb) {
+    gb = mountGuestbook($('gb-body'), { titles: titleOf, workLink: (id, a) => {
+      a.addEventListener('click', ev => {
+        ev.preventDefault(); gbD.close();
+        const i = stops.findIndex(s => s.rec && s.rec.w.id === id); if (i >= 0) toStop(i);
+      });
+    } });
+    gbD.querySelector('[data-close]').addEventListener('click', () => gbD.close());
+    $('gb-write').addEventListener('click', () => gb.focusForm());
+    showStats($('gb-stats'));
+  }
+  gb.open(slug || null);
+  gbD.showModal();
+  $('gb-body').scrollTop = 0;
+  if (slug) gb.focusForm();
+}
+$('b-guest').addEventListener('click', () => openGuest(null));
 
 // ---------------------------------------------------------------- zoom
 // Optical zoom: the field of view narrows and yaw/pitch shift so the point under the pointer stays under the pointer.
@@ -767,6 +863,7 @@ const pick = (cx, cy) => {
 };
 function clickAt(cx, cy) {   // the single click: walk to the picture or the spot on the floor
   const h = pick(cx, cy); if (!h) return;
+  if (h.object.userData.book) { openGuest(null); return; }
   if (h.object.userData.start) { if (cur < 0) nextStop(1); else toStop(0); return; }
   if (recOf.has(h.object)) { toStop(stops.findIndex(s => s.rec === recOf.get(h.object))); return; }
   if (Math.abs(h.point.y) < 0.05) {
@@ -782,7 +879,7 @@ function clickAt(cx, cy) {   // the single click: walk to the picture or the spo
 }
 const DBL = 260;   // a second click inside this window is a double-click, not two walks
 let drag = null, pend = null;
-const ptrs = new Map(); let pinchD = 0;
+const ptrs = new Map(); let pinchD = 0, pinchCounted = false;
 canvas.addEventListener('pointerdown', e => {
   if (!entered) return;
   canvas.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, e);
@@ -794,20 +891,22 @@ canvas.addEventListener('pointermove', e => {
   if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, e);
   if (ptrs.size === 2) {   // two-finger pinch
     const [a, b] = [...ptrs.values()], d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    if (pinchD && d && !pinchCounted) { pinchCounted = true; usedControl('pinch'); }
     if (pinchD && d) { walk = walk && walk.settle ? null : walk; setZoom(zoomT * d / pinchD, (a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2, true); }
     pinchD = d; return;
   }
-  if (!drag) { if (e.pointerType === 'mouse') { const h = pick(e.clientX, e.clientY); canvas.style.cursor = h && (recOf.has(h.object) || h.object.userData.start) ? 'pointer' : 'grab'; } return; }
+  if (!drag) { if (e.pointerType === 'mouse') { const h = pick(e.clientX, e.clientY); canvas.style.cursor = h && (recOf.has(h.object) || h.object.userData.start || h.object.userData.book) ? 'pointer' : 'grab'; } return; }
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY;
   if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) > 6) drag.moved = true;
   if (!drag.moved) return;
+  if (!drag.counted) { drag.counted = true; usedControl('drag'); }
   const k = 0.0034 * tanH(camera.fov) / tanH(62);   // finer drag the further in you are
   me.yaw += dx * k; me.pitch = clamp(me.pitch + dy * k, -0.9, 0.9);
   if (walk) { walk.free = true; if (walk.settle) walk = null; }
   lastInput = performance.now(); hideHint();
 });
 const release = e => {
-  ptrs.delete(e.pointerId); if (ptrs.size < 2) pinchD = 0;
+  ptrs.delete(e.pointerId); if (ptrs.size < 2) { pinchD = 0; pinchCounted = false; }
   if (!drag) return; const d = drag; drag = null;
   if (d.moved || performance.now() - d.t > 500) return;
   hideHint();
@@ -829,7 +928,7 @@ canvas.addEventListener('wheel', e => {   // wheel, and trackpad pinch (which ar
 const KEYS = { arrowup: 'f', w: 'f', arrowdown: 'b', s: 'b', arrowleft: 'l', q: 'l', arrowright: 'r', e: 'r', a: 'sl', d: 'sr' };
 const typing = t => t && (t.isContentEditable || /^(input|textarea|select)$/i.test(t.tagName));
 addEventListener('keydown', e => {
-  if (!entered || plan.open || dlg.open || codeD.open || artD.open || e.metaKey || e.ctrlKey || e.altKey || typing(e.target)) return;
+  if (!entered || plan.open || dlg.open || codeD.open || artD.open || gbD.open || e.metaKey || e.ctrlKey || e.altKey || typing(e.target)) return;
   const k = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
   if (KEYS[k]) { keys.add(KEYS[k]); e.preventDefault(); hideHint(); }
   else if (k === 'n' || k === 'pagedown') { e.preventDefault(); nextStop(1); }
@@ -848,6 +947,19 @@ $('t-prev').addEventListener('click', () => nextStop(-1));
 
 const hint = $('hint');
 function hideHint() { hint.classList.remove('on'); }
+
+// The standing controls line fades to very faint once the visitor has used the controls a few times (remembered between visits).
+const keysEl = $('keys'), coarse = matchMedia('(pointer: coarse)').matches;
+const used = { key: 0, wheel: 0, drag: 0, pinch: 0 };
+let wheelAt = 0;
+if (store.get('knowsControls', false)) keysEl.classList.add('quiet');
+function usedControl(k) {
+  used[k]++;
+  const knows = coarse ? used.drag >= 3 && used.pinch >= 2 : used.key >= 6 && used.wheel >= 3;
+  if (knows && !keysEl.classList.contains('quiet')) { keysEl.classList.add('quiet'); store.set('knowsControls', true); }
+}
+addEventListener('keydown', e => { if (entered && !e.repeat && !typing(e.target) && KEYS[e.key.toLowerCase()] && !e.metaKey && !e.ctrlKey && !e.altKey) usedControl('key'); }, { capture: true });
+canvas.addEventListener('wheel', e => { const n = performance.now(); if (n - wheelAt > 500) usedControl('wheel'); wheelAt = n; }, { passive: true });
 
 // ---------------------------------------------------------------- textures, nearest first
 // tiers: 0 thumbnail 512, 1 1280, 2 2048, 3 4000 (only for what you are looking at through the zoom)
@@ -972,7 +1084,7 @@ function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
   if (document.hidden) return;
-  if (dlg.open || plan.open || codeD.open || artD.open) { keys.clear(); vel.f = vel.s = vel.t = 0; return; }
+  if (dlg.open || plan.open || codeD.open || artD.open || gbD.open) { keys.clear(); vel.f = vel.s = vel.t = 0; return; }
   step(dt); stepZoom(dt);
   shiftX += (shiftTX - shiftX) * Math.min(1, dt * 5); shiftY += (shiftTY - shiftY) * Math.min(1, dt * 5);
   if (Math.abs(shiftX) > 0.5 || Math.abs(shiftY) > 0.5) camera.setViewOffset(innerWidth, innerHeight, shiftX, shiftY, innerWidth, innerHeight);
@@ -986,7 +1098,7 @@ function frame(now) {
 
 // ---------------------------------------------------------------- opening
 async function init() {
-  resize();
+  resize(); loadHearts();
   try { await Promise.all([document.fonts.load('40px Marcellus'), document.fonts.load('300 20px "Albert Sans"'), document.fonts.load('italic 20px "Albert Sans"'), document.fonts.load('600 20px "Albert Sans"')]); } catch {}
   rooms.forEach(buildRoom); buildNave(); buildCollision(); buildStops(); buildPlan(); buildArtists();
   const mirror = world.clone(true); mirror.scale.y = -1; scene.add(mirror);
@@ -1004,7 +1116,10 @@ async function init() {
         ? 'Drag to look around. Tap the floor or a picture to walk to it. Pinch or double-tap to zoom.'
         : 'Drag to look around. Click the floor or a picture to walk there. Scroll or double-click to zoom. Arrow keys also move you.';
       hint.hidden = false; requestAnimationFrame(() => hint.classList.add('on')); setTimeout(hideHint, 16000);
-      showWelcome();
+      keysEl.hidden = false;
+      const q = new URLSearchParams(location.search), wid = q.get('w'), xid = q.get('x');
+      const at = wid ? stops.findIndex(s => s.kind === 'work' && s.rec.w.id === wid) : xid ? stops.findIndex(s => s.kind === 'intro' && s.room.e.slug === xid) : -1;
+      if (at >= 0) toStop(at); else showWelcome();
     }, 650);
   }, { once: true });
 }

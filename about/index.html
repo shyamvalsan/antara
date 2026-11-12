@@ -5,8 +5,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>About | Antara</title>
 <meta name="description" content="Antara is a gallery you walk through. Six solo exhibitions, hung by Leela, with an audio guide to every work.">
+<link rel="canonical" href="https://shyamvalsan.github.io/antara/about/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Antara">
 <meta property="og:title" content="About | Antara">
 <meta property="og:description" content="Antara is a gallery you walk through. Six solo exhibitions, hung by Leela, with an audio guide to every work.">
+<meta property="og:url" content="https://shyamvalsan.github.io/antara/about/">
+<meta property="og:image" content="https://shyamvalsan.github.io/antara/s/gallery.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="About | Antara">
+<meta name="twitter:description" content="Antara is a gallery you walk through. Six solo exhibitions, hung by Leela, with an audio guide to every work.">
+<meta name="twitter:image" content="https://shyamvalsan.github.io/antara/s/gallery.jpg">
 
 <meta name="theme-color" content="#0E0E0D">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -18,11 +29,12 @@
 <body class="plain">
 <header class="top">
   <a class="mark" href="../">Antara</a>
-  <nav><a href="../">Walk the gallery</a><a href="../works/">All works</a><a href="../about/">About</a></nav>
+  <nav><a href="../">Walk the gallery</a><a href="../works/">All works</a><a href="../guestbook/">Guest book</a><a href="../about/">About</a></nav>
 </header>
 <main>
 <section class="lead">
 <h1>About Antara</h1>
+<p class="share" data-share data-url="https://shyamvalsan.github.io/antara/" data-title="Antara: A gallery for work that stays with you" data-text="Antara is a gallery you walk through. Six solo exhibitions, hung by Leela, with an audio guide to every work.">Share: <button type="button" class="link" data-copy>Copy link</button><a href="https://x.com/intent/post?text=Antara%3A%20A%20gallery%20for%20work%20that%20stays%20with%20you&amp;url=https%3A%2F%2Fshyamvalsan.github.io%2Fantara%2F" target="_blank" rel="noopener noreferrer">X</a><a href="https://www.facebook.com/sharer/sharer.php?u=https%3A%2F%2Fshyamvalsan.github.io%2Fantara%2F" target="_blank" rel="noopener noreferrer">Facebook</a><a href="https://wa.me/?text=Antara%3A%20A%20gallery%20for%20work%20that%20stays%20with%20you%20https%3A%2F%2Fshyamvalsan.github.io%2Fantara%2F" target="_blank" rel="noopener noreferrer">WhatsApp</a><a href="https://www.linkedin.com/sharing/share-offsite/?url=https%3A%2F%2Fshyamvalsan.github.io%2Fantara%2F" target="_blank" rel="noopener noreferrer">LinkedIn</a><a href="mailto:?subject=Antara%3A%20A%20gallery%20for%20work%20that%20stays%20with%20you&amp;body=Antara%20is%20a%20gallery%20you%20walk%20through.%20Six%20solo%20exhibitions%2C%20hung%20by%20Leela%2C%20with%20an%20audio%20guide%20to%20every%20work.%0A%0Ahttps%3A%2F%2Fshyamvalsan.github.io%2Fantara%2F" target="_blank" rel="noopener noreferrer">Email</a></p>
 </section>
 <section class="show">
 <h2>Leela<span>Director and curator</span></h2>
@@ -34,13 +46,39 @@
 <section class="show">
 <h2>The plain facts<span>What Antara is, and how it was made</span></h2>
 <div class="cols"><div>
-<p>Antara is a work of fiction from start to finish. The gallery, its curator, the six makers and their biographies, the exhibition texts, the building and every artwork were conceived and made by Fable 5.2, an AI model made by Anthropic, at the invitation and under the direction of one person.</p>
+<p>Antara is a work of fiction from start to finish. The gallery, its curator, the six makers and their biographies, the exhibition texts, the building and every artwork were conceived and made by Fable 5.2, an AI model, as an experiment set going by one person. See <a href="#experimenter">The experimenter</a>, below.</p>
 <p>No image-generation model was used. No photographs were used, and no source images of any kind. Each work is one self-contained Python program, numerical code that builds geometry, traces light, and simulates ink and paint, and the program computes the image, pixel by pixel. The full source of each program is published beside its work, so you can read exactly how the picture was made.</p>
 <p>The voice of the audio guide and the music are synthesized.</p>
 <p>The places, trades and traditions the makers come from are real. The people are not. Any resemblance to a real person is a coincidence.</p>
 </div></div>
 </section>
+<section class="show" id="experimenter">
+<h2>The experimenter</h2>
+<div class="cols"><div>
+<p>Behind the artificial mind there is a person. Shyam Sreevalsan set this experiment going: asked what a gallery would be if a machine imagined all of it, the people as well as the pictures; kept sending the work back until the pictures were worth standing in front of; and built Antara to share with the world.</p>
+<p>If something here stayed with you, say so. <a href="../guestbook/">Sign the guest book</a>, or write directly.</p>
+<ul class="contact">
+<li><span>Email</span> <a href="mailto:shyam.valsan@gmail.com">shyam.valsan@gmail.com</a></li>
+<li><span>X</span> <a href="https://x.com/shyamvalsan" rel="noopener">@shyamvalsan</a></li>
+<li><span>GitHub</span> <a href="https://github.com/shyamvalsan" rel="noopener">shyamvalsan</a></li>
+</ul>
+<p class="totals" id="totals" hidden></p>
+</div></div>
+</section><script>
+document.querySelectorAll('[data-share]').forEach(function (row) {
+  var b = row.querySelector('[data-copy]');
+  b.addEventListener('click', function () {
+    var u = row.dataset.url, done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy link'; }, 2200); };
+    if (navigator.clipboard) navigator.clipboard.writeText(u).then(done, function () { window.prompt('Copy this link', u); });
+    else window.prompt('Copy this link', u);
+  });
+});
+</script>
 </main>
 <footer class="foot"><p>Antara. Winter programme, 12 November 2026 to 28 February 2027.</p></footer>
+<script type="module">
+import { configure, showStats } from "../community.js";
+configure("https://antara-guestbook.shiny-mountain-4a1e.workers.dev"); showStats(document.getElementById("totals"));
+</script>
 </body>
 </html>

@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Guest book | Antara</title>
+<meta name="description" content="Leave a note in the Antara guest book.">
+<link rel="canonical" href="https://shyamvalsan.github.io/antara/guestbook/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Antara">
+<meta property="og:title" content="Guest book | Antara">
+<meta property="og:description" content="Leave a note in the Antara guest book.">
+<meta property="og:url" content="https://shyamvalsan.github.io/antara/guestbook/">
+<meta property="og:image" content="https://shyamvalsan.github.io/antara/s/gallery.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Guest book | Antara">
+<meta name="twitter:description" content="Leave a note in the Antara guest book.">
+<meta name="twitter:image" content="https://shyamvalsan.github.io/antara/s/gallery.jpg">
+
+<meta name="theme-color" content="#0E0E0D">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Marcellus&family=Albert+Sans:ital,wght@0,300;0,400;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../style.css">
+<link rel="icon" href="../mark.svg" type="image/svg+xml">
+</head>
+<body class="plain">
+<header class="top">
+  <a class="mark" href="../">Antara</a>
+  <nav><a href="../">Walk the gallery</a><a href="../works/">All works</a><a href="../guestbook/">Guest book</a><a href="../about/">About</a></nav>
+</header>
+<main>
+<section class="lead">
+<h1>Guest book</h1>
+<p>Visitors leave a few words here. Each note appears once it has been read.</p>
+<p class="totals" id="totals" hidden></p>
+</section>
+<div id="gb" class="gb-page"></div>
+<noscript><p>The guest book needs JavaScript. You can also write to <a href="../about/#experimenter">the person behind Antara</a>.</p></noscript>
+</main>
+<footer class="foot"><p>Antara. Winter programme, 12 November 2026 to 28 February 2027.</p></footer>
+<script type="module">
+import { configure, mountGuestbook, showStats } from "../community.js";
+configure("https://antara-guestbook.shiny-mountain-4a1e.workers.dev");
+const titles = {"hanle-three-hours-the-pole-keeps-still": "Hanle, three hours, the pole keeps still", "tso-moriri-new-moon-the-river-comes-down-to-the-water": "Tso Moriri, new moon, the river comes down to the water", "udo-channel-kelp-the-current-turning": "Udo channel, kelp, the current turning", "twelve-metres-the-abalone-wall-breath-nearly-gone": "Twelve metres, the abalone wall, breath nearly gone", "winter-1971-a-whale-went-under-me": "Winter 1971, a whale went under me", "under-the-float-looking-up": "Under the float, looking up", "kund-three-thousand-five-hundred-steps-one-going-down": "Kund, three thousand five hundred steps, one going down", "vav-the-seventh-storey-down-noon-in-may": "Vav, the seventh storey down, noon in May", "sala-de-espera-aduana-2500": "Sala de espera, Aduana, 25:00", "escalera-3-marea-alta": "Escalera 3, marea alta", "salar-puerta-mediodia": "Salar, puerta, mediodía", "third-mainland-inbound-640am-four-seconds": "Third Mainland, inbound, 6:40 am, four seconds", "ojuelegba-642pm-eleven-seconds": "Ojuelegba, 6:42 pm, eleven seconds", "oshodi-under-bridge-rain-coming-nine-seconds": "Oshodi under bridge, rain coming, nine seconds", "kavu-610pm-first-rain": "Kavu, 6:10 pm, first rain", "nila-thirunavaya-noon-cloth-drying": "The Nila at Thirunavaya, noon, cloth drying", "kumano-fourth-bend-komorebi": "Kumano, the fourth bend, komorebi", "kotka-3pm-december": "Kotka, 3 pm in December", "thrikkarthika-the-temple-tank-every-step-a-lamp": "Thrikkarthika, the temple tank, every step a lamp", "bumthang-a-weaver-one-butter-lamp": "Bumthang, a weaver, one butter lamp", "above-kibber-before-the-sun": "Above Kibber, before the sun reaches the pass", "kavu-year-unknown-machines-quiet": "Kavu, year unknown, the machines have gone quiet"};
+const gb = mountGuestbook(document.getElementById("gb"), { titles, workLink: (slug, a) => { a.href = "../works/#" + slug; } });
+const w = new URLSearchParams(location.search).get("work");
+gb.open(w);
+showStats(document.getElementById("totals"));
+</script>
+</body>
+</html>
