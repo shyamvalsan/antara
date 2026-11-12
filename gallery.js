@@ -11,7 +11,12 @@ const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls)
 // ---------------------------------------------------------------- dimensions (metres)
 const NW = 8, NH = 7.6, T = 0.5, RH = 5.4, DW = 2.8, DH = 3.6, EYE = 1.62, RAD = 0.35;
 const Z_START = 11, PZ = 3.2, PW = 4.4, PH = 3.7, PT = 0.36, GAP = 1.5;
-const NAVE_WALL = '#E6E3DB', NAVE_FLOOR = '#8D8A83', INK = '#1B1A18';
+const NAVE_WALL = '#E6E3DB', NAVE_FLOOR = '#8D8A83';
+// Evening light: ambient is low, each work has its own warm spot. Levels are in sRGB space.
+const AMB = 0.34, AMB_D = 1.0;          // wall brightness away from the works (light rooms, dark rooms)
+const TXT = '#EFE8DA', TXT2 = '#B9B2A6'; // lettering on the dim walls
+const WARM = '#FFC98A';
+const ZMAX_DEG = 7;                       // narrowest field of view when zoomed
 const UP = new THREE.Vector3(0, 1, 0);
 
 // ---------------------------------------------------------------- renderer
@@ -38,6 +43,11 @@ const solids = [];                 // what a click can land on
 const col = h => new THREE.Color(h);
 const lum = h => { const c = col(h); return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b; };
 const mix = (a, b, t) => '#' + col(a).lerp(col(b), t).getHexString();
+const rgbOf = h => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+const hexOf = a => '#' + a.map(v => clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0')).join('');
+const dim = (h, k) => hexOf(rgbOf(h).map(v => v * k));              // scale in sRGB, as the eye reads it
+const mixs = (a, b, t) => { const x = rgbOf(a), y = rgbOf(b); return hexOf(x.map((v, i) => v + (y[i] - v) * t)); };
+const rgbs = h => rgbOf(h).join(',');
 
 function canvasTex(w, h, draw) {
   const c = document.createElement('canvas');
@@ -60,41 +70,54 @@ function speckle(g, w, h, n, amt) {   // plaster / concrete mottling
 // ---------------------------------------------------------------- walls
 // A wall is a vertical plane seen from the side its normal points to.
 // `a` runs along it left to right as seen from that side, `y` is height.
-function makeWall({ c, n, len, h, color, dark = false, openings = [], pools = [], texts = [], ppm = 44, into = world, solid = true }) {
+function makeWall({ c, n, len, h, color, dark = false, amb = dark ? AMB_D : AMB, openings = [], pools = [], texts = [], ppm = 44, into = world, solid = true }) {
   const nrm = new THREE.Vector3(n[0], 0, n[1]);
   const r = new THREE.Vector3().crossVectors(UP, nrm);
   const o = new THREE.Vector3(c[0], 0, c[1]).addScaledVector(r, -len / 2);
   const at = (a, y, off = 0) => o.clone().addScaledVector(r, a).addScaledVector(nrm, off).setY(y);
   const aOf = (x, z) => (x - o.x) * r.x + (z - o.z) * r.z;
   ppm = Math.min(ppm, 4096 / len);
+  const base = dim(color, amb), tint = rgbs(mixs(color, WARM, 0.3));
+  const glow = (g, cx, cy, rx, ry, a, rgb = tint, stops = [[0, 1], [0.4, 0.74], [0.7, 0.34], [0.9, 0.08], [1, 0]]) => {   // soft elliptical light, added to what is there
+    g.save(); g.globalCompositeOperation = 'lighter'; g.translate(cx, cy); g.scale(rx, ry);
+    const gr = g.createRadialGradient(0, 0, 0, 0, 0, 1);
+    for (const [t, k] of stops) gr.addColorStop(t, `rgba(${rgb},${a * k})`);
+    g.fillStyle = gr; g.fillRect(-1, -1, 2, 2); g.restore();
+  };
   const tex = canvasTex(len * ppm, h * ppm, (g, W, H) => {
-    g.fillStyle = color; g.fillRect(0, 0, W, H);
-    speckle(g, W, H, 60, dark ? 0.03 : 0.022);
-    let gr = g.createLinearGradient(0, 0, 0, H);
-    if (dark) { gr.addColorStop(0, 'rgba(0,0,0,.62)'); gr.addColorStop(0.5, 'rgba(0,0,0,.12)'); gr.addColorStop(1, 'rgba(0,0,0,.38)'); }
-    else { gr.addColorStop(0, 'rgba(255,255,255,.16)'); gr.addColorStop(0.45, 'rgba(255,255,255,0)'); gr.addColorStop(1, 'rgba(0,0,0,.13)'); }
+    g.fillStyle = base; g.fillRect(0, 0, W, H);
+    speckle(g, W, H, 60, 0.02);
+    let gr = g.createLinearGradient(0, 0, 0, H);   // light dies away toward the ceiling and the floor
+    gr.addColorStop(0, 'rgba(0,0,0,.5)'); gr.addColorStop(0.4, 'rgba(0,0,0,.05)'); gr.addColorStop(1, 'rgba(0,0,0,.3)');
     g.fillStyle = gr; g.fillRect(0, 0, W, H);
     for (const [x0, x1] of [[0, 1.4 * ppm], [W, W - 1.4 * ppm]]) {   // corners
       gr = g.createLinearGradient(x0, 0, x1, 0);
-      gr.addColorStop(0, `rgba(0,0,0,${dark ? 0.3 : 0.12})`); gr.addColorStop(1, 'rgba(0,0,0,0)');
+      gr.addColorStop(0, `rgba(0,0,0,${dark ? 0.3 : 0.25})`); gr.addColorStop(1, 'rgba(0,0,0,0)');
       g.fillStyle = gr; g.fillRect(Math.min(x0, x1), 0, Math.abs(x1 - x0), H);
     }
-    for (const p of pools) {   // light on and around each work
-      const cx = p.a * ppm, cy = H - p.y * ppm, rx = (p.w * 0.5 + (dark ? 1.0 : 1.3)) * ppm, ry = (p.h * 0.5 + (dark ? 0.9 : 1.2)) * ppm;
-      g.save(); g.translate(cx, cy - 0.15 * ry); g.scale(rx, ry);
-      gr = g.createRadialGradient(0, 0, 0.2, 0, 0, 1);
-      gr.addColorStop(0, dark ? 'rgba(255,228,190,.30)' : 'rgba(255,255,255,.26)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
-      g.fillStyle = gr; g.fillRect(-1, -1, 2, 2); g.restore();
-      g.save(); g.shadowColor = `rgba(0,0,0,${dark ? 0.7 : 0.4})`; g.shadowBlur = 0.16 * ppm; g.shadowOffsetY = 0.07 * ppm;
-      g.fillStyle = color; g.fillRect(cx - p.w * ppm / 2, cy - p.h * ppm / 2, p.w * ppm, p.h * ppm); g.restore();
+    for (const p of pools) {   // a warm spot on each work: broad pool, hot scallop under the fixture, soft shadow below the frame
+      const cx = p.a * ppm, cy = H - p.y * ppm, top = cy - p.h * ppm / 2;
+      glow(g, cx, cy - 0.1 * p.h * ppm, (p.w * 0.5 + 1.2) * ppm, (p.h * 0.5 + 1.05) * ppm, dark ? 0.9 : 0.78);
+      glow(g, cx, top - 0.12 * ppm, (p.w * 0.45 + 0.35) * ppm, 0.7 * ppm, dark ? 0.2 : 0.26, rgbs(mixs(color, '#FFDDAA', 0.5)));
+      g.save(); g.shadowColor = 'rgba(0,0,0,.8)'; g.shadowBlur = 0.2 * ppm; g.shadowOffsetY = 0.09 * ppm;
+      g.fillStyle = base; g.fillRect(cx - p.w * ppm / 2, cy - p.h * ppm / 2, p.w * ppm, p.h * ppm); g.restore();
     }
-    g.fillStyle = 'rgba(0,0,0,.55)'; g.fillRect(0, H - 0.03 * ppm, W, 0.03 * ppm);   // shadow gap at the floor
-    for (const t of texts) {
-      let y = H - t.y * ppm;
+    g.fillStyle = 'rgba(0,0,0,.6)'; g.fillRect(0, H - 0.03 * ppm, W, 0.03 * ppm);   // shadow gap at the floor
+    for (const t of texts) {   // lettering is pale, with its own gentle wash of light
       g.textBaseline = 'top'; g.textAlign = t.align || 'left';
+      let mw = 0, th = 0;
+      for (const ln of t.lines) {
+        const px = ln.size * ppm; g.font = `${ln.style || ''} ${px}px ${ln.font || 'Marcellus'}`;
+        if (ln.track) g.letterSpacing = `${ln.track * px}px`;
+        mw = Math.max(mw, g.measureText(ln.text).width); th += px * (ln.lead || 1.35);
+        if (ln.track) g.letterSpacing = '0px';
+      }
+      const x0 = t.align === 'center' ? t.a * ppm - mw / 2 : t.align === 'right' ? t.a * ppm - mw : t.a * ppm;
+      let y = H - t.y * ppm;
+      glow(g, x0 + mw / 2, y + th * 0.42, mw / 2 + 1.1 * ppm, th / 2 + 0.9 * ppm, t.wash ?? 0.2, tint, [[0, 1], [0.4, 0.62], [0.75, 0.18], [1, 0]]);
       for (const ln of t.lines) {
         const px = ln.size * ppm;
-        g.font = `${ln.style || ''} ${px}px ${ln.font || 'Marcellus'}`; g.fillStyle = ln.color || INK;
+        g.font = `${ln.style || ''} ${px}px ${ln.font || 'Marcellus'}`; g.fillStyle = ln.color || TXT;
         if (ln.track) g.letterSpacing = `${ln.track * px}px`;
         g.fillText(ln.text, t.a * ppm, y);
         if (ln.track) g.letterSpacing = '0px';
@@ -130,17 +153,18 @@ function flat(x0, x1, z0, z1, y, tex, up, into, opacity = 1) {   // floor (up) o
   into.add(m);
   return m;
 }
-function floorTex(wm, dm, color, dark, spills = []) {
+function floorTex(wm, dm, color, amb, spills = []) {   // spills: pools of light on the floor, in metres from the top-left
   const ppm = Math.min(28, 2048 / Math.max(wm, dm));
   return canvasTex(wm * ppm, dm * ppm, (g, W, H) => {
-    g.fillStyle = color; g.fillRect(0, 0, W, H);
-    speckle(g, W, H, 140, dark ? 0.05 : 0.04);
-    for (const s of spills) {   // light falling from a work onto the floor
-      const gr = g.createRadialGradient(s.u * W, s.v * H, 0, s.u * W, s.v * H, s.r * ppm);
-      gr.addColorStop(0, 'rgba(255,225,185,.16)'); gr.addColorStop(1, 'rgba(255,225,185,0)');
-      g.fillStyle = gr; g.fillRect(0, 0, W, H);
+    g.fillStyle = dim(color, amb); g.fillRect(0, 0, W, H);
+    speckle(g, W, H, 140, 0.03);
+    for (const s of spills) {
+      g.save(); g.globalCompositeOperation = 'lighter'; g.translate(s.u * ppm, s.v * ppm); g.scale(s.rx * ppm, s.rz * ppm);
+      const gr = g.createRadialGradient(0, 0, 0, 0, 0, 1);
+      gr.addColorStop(0, `rgba(${s.c},${s.a})`); gr.addColorStop(0.5, `rgba(${s.c},${s.a * 0.45})`); gr.addColorStop(1, `rgba(${s.c},0)`);
+      g.fillStyle = gr; g.fillRect(-1, -1, 2, 2); g.restore();
     }
-    const e = 1.1 * ppm, k = dark ? 0.4 : 0.2;   // darker where floor meets wall
+    const e = 1.1 * ppm, k = 0.3;   // darker where floor meets wall
     for (const [x0, y0, x1, y1] of [[0, 0, e, 0], [W, 0, W - e, 0], [0, 0, 0, e], [0, H, 0, H - e]]) {
       const gr = g.createLinearGradient(x0, y0, x1, y1);
       gr.addColorStop(0, `rgba(0,0,0,${k})`); gr.addColorStop(1, 'rgba(0,0,0,0)');
@@ -148,21 +172,31 @@ function floorTex(wm, dm, color, dark, spills = []) {
     }
   });
 }
-function ceilTex(wm, dm, color, dark, light) {   // light = [u0,v0,u1,v1] of the laylight
+function ceilTex(wm, dm, color, amb, light, lamps = [], bars = []) {   // light = [u0,v0,u1,v1] of the laylight; lamps and bars in metres from the top-left
   const ppm = Math.min(24, 2048 / Math.max(wm, dm));
   return canvasTex(wm * ppm, dm * ppm, (g, W, H) => {
-    g.fillStyle = color; g.fillRect(0, 0, W, H);
-    if (!light) return;
-    const [x0, y0, x1, y1] = [light[0] * W, light[1] * H, light[2] * W, light[3] * H];
-    g.save(); g.shadowColor = dark ? 'rgba(255,240,220,.25)' : 'rgba(255,255,255,.9)'; g.shadowBlur = 1.2 * ppm;
-    g.fillStyle = dark ? '#3A3632' : '#FDFCF8'; g.fillRect(x0, y0, x1 - x0, y1 - y0); g.restore();
-    g.strokeStyle = dark ? 'rgba(0,0,0,.5)' : 'rgba(120,118,110,.35)'; g.lineWidth = Math.max(1, 0.05 * ppm);
-    const horiz = x1 - x0 > y1 - y0, n = Math.round((horiz ? x1 - x0 : y1 - y0) / (1.6 * ppm));
-    for (let i = 1; i < n; i++) {
-      g.beginPath();
-      if (horiz) { const x = x0 + (x1 - x0) * i / n; g.moveTo(x, y0); g.lineTo(x, y1); }
-      else { const y = y0 + (y1 - y0) * i / n; g.moveTo(x0, y); g.lineTo(x1, y); }
-      g.stroke();
+    g.fillStyle = dim(color, amb); g.fillRect(0, 0, W, H);
+    if (light) {   // the laylight, at dusk
+      const [x0, y0, x1, y1] = [light[0] * W, light[1] * H, light[2] * W, light[3] * H];
+      g.save(); g.shadowColor = 'rgba(120,135,165,.12)'; g.shadowBlur = 1.2 * ppm;
+      g.fillStyle = '#272C39'; g.fillRect(x0, y0, x1 - x0, y1 - y0); g.restore();
+      g.strokeStyle = 'rgba(0,0,0,.4)'; g.lineWidth = Math.max(1, 0.05 * ppm);
+      const horiz = x1 - x0 > y1 - y0, n = Math.round((horiz ? x1 - x0 : y1 - y0) / (1.6 * ppm));
+      for (let i = 1; i < n; i++) {
+        g.beginPath();
+        if (horiz) { const x = x0 + (x1 - x0) * i / n; g.moveTo(x, y0); g.lineTo(x, y1); }
+        else { const y = y0 + (y1 - y0) * i / n; g.moveTo(x0, y); g.lineTo(x1, y); }
+        g.stroke();
+      }
+    }
+    g.strokeStyle = '#0B0B0A'; g.lineWidth = 0.07 * ppm; g.lineCap = 'round';
+    for (const b of bars) { g.beginPath(); g.moveTo(b[0] * ppm, b[1] * ppm); g.lineTo(b[2] * ppm, b[3] * ppm); g.stroke(); }
+    for (const l of lamps) {   // a small black fixture with a warm lens
+      g.fillStyle = '#0B0B0A'; g.beginPath(); g.arc(l[0] * ppm, l[1] * ppm, 0.11 * ppm, 0, 7); g.fill();
+      g.save(); g.globalCompositeOperation = 'lighter'; g.translate(l[0] * ppm, l[1] * ppm); g.scale(0.55 * ppm, 0.55 * ppm);
+      const gr = g.createRadialGradient(0, 0, 0, 0, 0, 1); gr.addColorStop(0, 'rgba(255,214,150,.32)'); gr.addColorStop(1, 'rgba(255,214,150,0)');
+      g.fillStyle = gr; g.fillRect(-1, -1, 2, 2); g.restore();
+      g.fillStyle = '#FFE6B8'; g.beginPath(); g.arc(l[0] * ppm, l[1] * ppm, 0.045 * ppm, 0, 7); g.fill();
     }
   });
 }
@@ -180,7 +214,7 @@ function hang(wall, w, e, a, room, maxDist, dark) {
   const s = size(w, e), y = centreY(s), rotY = Math.atan2(wall.nrm.x, wall.nrm.z);
   const put = (mesh, off, dx = 0, yy = y) => { mesh.position.copy(wall.at(a + dx, yy, off)); mesh.rotation.y = rotY; world.add(mesh); return mesh; };
   put(new THREE.Mesh(new THREE.BoxGeometry(s.fw, s.fh, 0.05), new THREE.MeshBasicMaterial({ color: e.frame })), 0.025);
-  if (s.m) put(new THREE.Mesh(new THREE.PlaneGeometry(s.ww + 2 * s.m, s.wh + 2 * s.m), new THREE.MeshBasicMaterial({ color: dark ? '#E4DFD3' : '#F1EEE6' })), 0.0515);
+  if (s.m) put(new THREE.Mesh(new THREE.PlaneGeometry(s.ww + 2 * s.m, s.wh + 2 * s.m), new THREE.MeshBasicMaterial({ color: dark ? '#CFCABF' : '#DDD9CF' })), 0.0515);
   const art = put(new THREE.Mesh(new THREE.PlaneGeometry(s.ww, s.wh), new THREE.MeshBasicMaterial({ color: '#777' })), 0.054);
   // wall label
   const lw = 0.34, lh = 0.2;
@@ -198,7 +232,7 @@ function hang(wall, w, e, a, room, maxDist, dark) {
     g.font = '21px "Albert Sans"'; g.fillStyle = '#3A3936';
     g.fillText(w.medium, 30, yy, W - 60); g.fillText(`${w.cm[0]} × ${w.cm[1]} cm`, 30, yy + 29);
   });
-  put(new THREE.Mesh(new THREE.PlaneGeometry(lw, lh), new THREE.MeshBasicMaterial({ map: label })), 0.006, s.fw / 2 + 0.3 + lw / 2, 1.22);
+  put(new THREE.Mesh(new THREE.PlaneGeometry(lw, lh), new THREE.MeshBasicMaterial({ map: label, color: '#CFCAC0' })), 0.006, s.fw / 2 + 0.3 + lw / 2, 1.22);
   const rec = { w, e, room, art, s, y, pos: wall.at(a, y, 0), n: wall.nrm.clone(), maxDist, level: -1, want: 0, busy: false };
   recOf.set(art, rec); solids.push(art); works.push(rec);
   return rec;
@@ -247,21 +281,31 @@ function buildRoom(R) {
   pa.forEach(p => hang(wl, p.w, e, wl.aOf(p.x, p.z), R, width - 1.0, dark));
   hang(far, R.hero, e, width / 2, R, depth - 1.0, dark);
   pb.forEach(p => hang(wr, p.w, e, wr.aOf(p.x, p.z), R, width - 1.0, dark));
-  // floor, ceiling, door reveal
-  const fx0 = side * NW / 2, spills = [];
-  if (dark) for (const p of [...pa, ...pb, { x: xFar, z: zc }]) {
-    const px = p.x === xFar ? xFar - side * 0.5 : p.x, pz = p.z === zc && p.x === xFar ? zc : p.z + (p.z === z0 ? -0.5 : 0.5);
-    spills.push({ u: (px - Math.min(fx0, xFar)) / Math.abs(xFar - fx0), v: (pz - z1) / width, r: 2.6 });
+  // floor and ceiling: a pool of light on the floor in front of each work, and a spot fixture above it
+  const fx0 = side * NW / 2, fMinX = Math.min(fx0, xFar), cMinX = Math.min(xNear, xFar), spills = [], lamps = [], bars = [];
+  const inward = p => (p.z === z0 ? -1 : 1);
+  const wc = rgbs(mixs(e.wall, WARM, 0.55));
+  for (const grp of [pa, pb]) {
+    const ls = [];
+    for (const p of grp) {
+      const nz = inward(p);
+      spills.push({ u: p.x - fMinX, v: p.z + nz * 1.15 - z1, rx: p.s.fw * 0.55 + 0.8, rz: 1.5, a: dark ? 0.3 : 0.26, c: wc });
+      ls.push([p.x - cMinX, z0 - (p.z + nz * 1.0)]);
+    }
+    lamps.push(...ls);
+    if (ls.length) { const xs = ls.map(l => l[0]); bars.push([Math.min(...xs) - 0.5, ls[0][1], Math.max(...xs) + 0.5, ls[0][1]]); }
   }
+  spills.push({ u: xFar - side * 1.15 - fMinX, v: zc - z1, rx: 1.5, rz: hs.fw * 0.55 + 0.8, a: dark ? 0.3 : 0.26, c: wc });
+  lamps.push([xFar - side * 1.0 - cMinX, z0 - zc]); bars.push([xFar - side * 1.0 - cMinX, z0 - zc - hs.fw / 2 - 0.5, xFar - side * 1.0 - cMinX, z0 - zc + hs.fw / 2 + 0.5]);
   const fcol = dark ? mix(e.wall, '#000000', 0.45) : mix(NAVE_FLOOR, e.wall, 0.18);
-  solids.push(flat(Math.min(fx0, xFar), Math.max(fx0, xFar), z1, z0, 0, floorTex(Math.abs(xFar - fx0), width, fcol, dark, spills), true, floors, dark ? 0.87 : 0.86));
+  solids.push(flat(Math.min(fx0, xFar), Math.max(fx0, xFar), z1, z0, 0, floorTex(Math.abs(xFar - fx0), width, fcol, dark ? 1.0 : 0.38, spills), true, floors, 0.84));
   const cc = dark ? mix(e.wall, '#000000', 0.7) : mix(e.wall, '#ffffff', 0.25);
-  flat(xNear, xFar, z1, z0, RH, ceilTex(depth, width, cc, dark, dark ? null : [0.16, 0.16, 0.84, 0.84]), false, world);
-  const jm = new THREE.MeshBasicMaterial({ color: mix(NAVE_WALL, "#000000", 0.2), side: THREE.DoubleSide });
+  flat(xNear, xFar, z1, z0, RH, ceilTex(depth, width, cc, dark ? 1.0 : 0.3, dark ? null : [0.16, 0.16, 0.84, 0.84], lamps, bars), false, world);
+  const jm = new THREE.MeshBasicMaterial({ color: mixs(dim(NAVE_WALL, 0.24), WARM, 0.12), side: THREE.DoubleSide });
   for (const zz of [zc - DW / 2, zc + DW / 2]) {
     const j = new THREE.Mesh(new THREE.PlaneGeometry(T, DH), jm); j.position.set(side * (NW / 2 + T / 2), DH / 2, zz); world.add(j);
   }
-  const so = new THREE.Mesh(new THREE.PlaneGeometry(T, DW), new THREE.MeshBasicMaterial({ color: mix(NAVE_WALL, '#000000', 0.22), side: THREE.DoubleSide }));
+  const so = new THREE.Mesh(new THREE.PlaneGeometry(T, DW), new THREE.MeshBasicMaterial({ color: dim(NAVE_WALL, 0.2), side: THREE.DoubleSide }));
   so.rotation.x = Math.PI / 2; so.position.set(side * (NW / 2 + T / 2), DH, zc); world.add(so);
 }
 
@@ -270,14 +314,14 @@ function buildNave() {
   const lettering = (wall, r, alignRight) => ({
     a: wall.aOf(r.side * NW / 2, r.zc + DW / 2 + 0.9), y: 2.55, align: alignRight ? 'left' : 'right',
     lines: [{ text: r.e.artist, size: 0.36, lead: 1.5 }, { text: r.e.title, size: 0.2, font: '"Albert Sans"', style: 'italic 300', lead: 1.7 },
-      { text: D.dates, size: 0.105, font: '"Albert Sans"', color: '#55534E' }],
+      { text: D.dates, size: 0.105, font: '"Albert Sans"', color: TXT2 }],
   });
   const open = (wall, side) => rooms.filter(r => r.side === side).map(r => { const a = wall.aOf(side * NW / 2, r.zc); return { a0: a - DW / 2, a1: a + DW / 2, h: DH }; });
   for (const side of [-1, 1]) {
     // left wall runs away from the entrance, so its lettering sits before each door and reads toward it
     const probe = makeProbe([side * NW / 2, (Z_START + Z_END) / 2], [-side, 0], NL);
     makeWall({ c: [side * NW / 2, (Z_START + Z_END) / 2], n: [-side, 0], len: NL, h: NH, color: NAVE_WALL, ppm: 40,
-      openings: open(probe, side), texts: rooms.filter(r => r.side === side).map(r => lettering(probe, r, side > 0)) });
+      openings: open(probe, side), texts: rooms.filter(r => r.side === side).map(r => ({ ...lettering(probe, r, side > 0), wash: 0.24 })) });
   }
   makeWall({ c: [0, Z_START], n: [0, -1], len: NW, h: NH, color: NAVE_WALL });
   const nw = D.exhibitions.flatMap(e => e.works.filter(w => w.nave).map(w => ({ w, e })))[0];
@@ -286,18 +330,25 @@ function buildNave() {
     pools: nw ? [{ a: NW / 2, y: centreY(s), w: s.fw, h: s.fh }] : [],
     texts: nw ? [] : [{ a: NW / 2, y: 3.3, align: 'center', lines: [
       { text: 'Stand further back than you think.', size: 0.25, lead: 1.55 }, { text: 'Then come much closer than is polite.', size: 0.25, lead: 2.3 },
-      { text: D.curator.name, size: 0.12, font: '"Albert Sans"', color: '#55534E' }] }] });
+      { text: D.curator.name, size: 0.12, font: '"Albert Sans"', color: TXT2 }] }] });
   if (nw) naveWork = hang(end, nw.w, nw.e, NW / 2, null, 30, false);
-  solids.push(flat(-NW / 2, NW / 2, Z_END, Z_START, 0, floorTex(NW, NL, NAVE_FLOOR, false), true, floors, 0.86));
-  flat(-NW / 2, NW / 2, Z_END, Z_START, NH, ceilTex(NW, NL, '#CFCBC2', false, [0.3, 0.012, 0.7, 0.988]), false, world);
+  // the light of each room spills out of its door onto the nave floor; the end work has its own pool and fixture
+  const spills = rooms.map(r => ({ u: r.side * 2.9 + NW / 2, v: r.zc - Z_END, rx: 2.4, rz: DW * 0.9, a: 0.3, c: rgbs(mixs(r.e.wall, WARM, 0.55)) }));
+  const lamps = [];
+  if (nw) {
+    spills.push({ u: NW / 2, v: 1.2, rx: s.fw * 0.55 + 0.8, rz: 1.5, a: 0.26, c: rgbs(WARM) });
+    lamps.push([NW / 2, NL - 1.0]);
+  }
+  solids.push(flat(-NW / 2, NW / 2, Z_END, Z_START, 0, floorTex(NW, NL, NAVE_FLOOR, 0.38, spills), true, floors, 0.84));
+  flat(-NW / 2, NW / 2, Z_END, Z_START, NH, ceilTex(NW, NL, '#CFCBC2', 0.3, [0.3, 0.012, 0.7, 0.988], lamps), false, world);
   // the title wall in the foyer
-  const lines = [{ text: D.name.toUpperCase(), size: 0.62, track: 0.24, lead: 1.75 }, { text: D.line, size: 0.15, font: '"Albert Sans"', style: '300', color: '#3D3B37' }];
-  makeWall({ c: [0, PZ + PT / 2], n: [0, 1], len: PW, h: PH, color: '#F1EFE9', texts: [{ a: PW / 2 + 0.07, y: 2.45, align: 'center', lines }] });
+  const lines = [{ text: D.name.toUpperCase(), size: 0.62, track: 0.24, lead: 1.75 }, { text: D.line, size: 0.15, font: '"Albert Sans"', style: '300', color: TXT2 }];
+  makeWall({ c: [0, PZ + PT / 2], n: [0, 1], len: PW, h: PH, color: '#F1EFE9', texts: [{ a: PW / 2 + 0.07, y: 2.45, align: 'center', lines, wash: 0.3 }] });
   makeWall({ c: [0, PZ - PT / 2], n: [0, -1], len: PW, h: PH, color: '#F1EFE9', texts: [{ a: 0.45, y: 2.6, lines: [
-    { text: D.season, size: 0.3, lead: 1.5 }, { text: D.dates, size: 0.13, font: '"Albert Sans"', color: '#55534E', lead: 2.6 },
+    { text: D.season, size: 0.3, lead: 1.5 }, { text: D.dates, size: 0.13, font: '"Albert Sans"', color: TXT2, lead: 2.6 },
     ...D.exhibitions.map(e => ({ text: `${e.artist}, ${e.title}`, size: 0.115, font: '"Albert Sans"', lead: 1.62 })),
-    { text: '', size: 0.1 }, { text: `Hung by ${D.curator.name}`, size: 0.105, font: '"Albert Sans"', style: 'italic', color: '#55534E' }] }] });
-  const edge = new THREE.MeshBasicMaterial({ color: '#D5D2CA' });
+    { text: '', size: 0.1 }, { text: `Hung by ${D.curator.name}`, size: 0.105, font: '"Albert Sans"', style: 'italic', color: TXT2 }] }] });
+  const edge = new THREE.MeshBasicMaterial({ color: dim('#D5D2CA', 0.3) });
   const box = new THREE.Mesh(new THREE.BoxGeometry(PW - 0.002, PH - 0.002, PT - 0.004), edge); box.position.set(0, PH / 2, PZ); world.add(box);
 }
 function makeProbe(c, n, len) {
@@ -346,6 +397,9 @@ function route(a, b) {
 const me = { x: 0, z: 8.6, yaw: 0, pitch: 0 };
 let walk = null, focus = null, entered = false, lastInput = 0;
 const keys = new Set();
+const vel = { f: 0, s: 0, t: 0 };   // smoothed walking, strafing and turning
+let baseFov = 62, zoom = 1, zoomT = 1, zoomMax = 9, anchor = null;   // optical zoom: narrows the field of view toward a point on screen
+const fovFor = z => THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(baseFov / 2)) / z));
 let shiftX = 0, shiftY = 0, shiftTX = 0, shiftTY = 0;   // view offset so the panel does not cover the work
 
 const angDiff = (a, b) => { let d = (b - a) % (2 * Math.PI); if (d > Math.PI) d -= 2 * Math.PI; if (d < -Math.PI) d += 2 * Math.PI; return d; };
@@ -355,11 +409,12 @@ const wide = () => innerWidth >= 820;
 function go(to, endYaw, endPitch, onArrive) {
   const pts = route({ x: me.x, z: me.z }, to);
   let len = 0, p = me; for (const q of pts) { len += Math.hypot(q.x - p.x, q.z - p.z); p = q; }
+  zoomT = 1; anchor = null;
   walk = { pts, i: 0, endYaw, endPitch: endPitch ?? 0, onArrive, speed: clamp(len / 3.6, 2.4, 8), free: false, settle: false, t: 0 };
 }
 
 function viewPose(rec) {
-  const vt = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)), ht = vt * camera.aspect;
+  const vt = Math.tan(THREE.MathUtils.degToRad(baseFov / 2)), ht = vt * camera.aspect;
   const fx = wide() ? (innerWidth - 430) / innerWidth * 0.8 : 0.9, fy = wide() ? 0.74 : 0.37;
   let d = Math.max(rec.s.fh / 2 / (vt * fy), rec.s.fw / 2 / (ht * fx), 1.25);
   d = Math.min(d, rec.maxDist);
@@ -393,9 +448,16 @@ const nextStop = d => {
   toStop(cur + d);
 };
 
-// ---------------------------------------------------------------- audio guide
+// ---------------------------------------------------------------- sound: the curator's voice (off until asked for) and ambient music
 const voice = $('voice');
-let guide = true, playing = null;
+const store = { get: (k, d) => { try { const v = localStorage.getItem('antara.' + k); return v == null ? d : v === '1'; } catch { return d; } },
+  set: (k, v) => { try { localStorage.setItem('antara.' + k, v ? '1' : '0'); } catch {} } };
+let voiceOn = store.get('voice', false), musicOn = store.get('music', true), playing = null;
+const MUSIC_VOL = 0.22;
+const music = D.music ? Object.assign(new Audio(), { loop: true, preload: 'auto', volume: 0 }) : null;
+let musicLive = false, musicTried = false;
+if (music) music.addEventListener('error', () => { music.dataset.bad = '1'; });
+
 function setTrack(a) {
   playing = a; $('player').hidden = !a;
   if (!a) return;
@@ -411,18 +473,56 @@ voice.addEventListener('timeupdate', () => {
   const d = voice.duration || playing.dur;
   $('p-bar').style.width = `${100 * voice.currentTime / d}%`; $('p-time').textContent = mmss(Math.max(0, d - voice.currentTime));
 });
-$('b-guide').addEventListener('click', () => {
-  guide = !guide; $('b-guide').textContent = guide ? 'Audio guide on' : 'Audio guide off'; $('b-guide').setAttribute('aria-pressed', guide);
-  if (!guide) voice.pause();
+
+function startMusic() {   // browsers want a gesture first; called from every early input until it takes
+  if (!music || !musicOn || musicLive || music.dataset.bad) return;
+  if (!music.src) music.src = 'ambient.mp3';
+  music.play().then(() => { musicLive = true; }).catch(() => {});
+}
+for (const t of ['pointerdown', 'keydown', 'touchend']) addEventListener(t, startMusic, { capture: true, passive: true });
+let lastAudio = performance.now();
+setInterval(() => {   // fade in over about 3 s, duck to a third while the voice speaks
+  const now = performance.now(), dt = Math.min(0.5, (now - lastAudio) / 1000); lastAudio = now;
+  if (!music || !musicLive) return;
+  const speaking = !voice.paused && !voice.ended;
+  const target = musicOn ? (speaking ? MUSIC_VOL / 3 : MUSIC_VOL) : 0;
+  const rate = target < music.volume ? MUSIC_VOL / 0.7 : MUSIC_VOL / (speaking ? 1.2 : 3);
+  music.volume = clamp(music.volume + clamp(target - music.volume, -rate * dt, rate * dt), 0, 1);
+  if (!musicOn && music.volume <= 0.002 && !music.paused) music.pause();
+}, 80);
+document.addEventListener('visibilitychange', () => { if (!music || !musicLive) return; if (document.hidden) music.pause(); else if (musicOn) music.play().catch(() => {}); });
+
+const SND = { voice: { on: 'Voice is on. Turn off the curator\'s voice', off: 'Voice is off. Turn on the curator\'s voice' },
+  music: { on: 'Music is on. Turn off the music', off: 'Music is off. Turn on the music' } };
+function syncSound() {
+  for (const b of document.querySelectorAll('[data-snd]')) {
+    const k = b.dataset.snd, on = k === 'voice' ? voiceOn : musicOn;
+    b.setAttribute('aria-pressed', on); b.title = SND[k][on ? 'on' : 'off'];
+  }
+}
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-snd]'); if (!b) return;
+  if (b.dataset.snd === 'voice') {
+    voiceOn = !voiceOn; store.set('voice', voiceOn);
+    if (!voiceOn) voice.pause();
+    else if (playing && !panel.hidden && voice.paused && !voice.ended) play();
+  } else {
+    musicOn = !musicOn; store.set('music', musicOn);
+    if (musicOn) { if (musicLive) music.play().catch(() => {}); else startMusic(); }
+  }
+  syncSound();
 });
+syncSound();
 
 // ---------------------------------------------------------------- the panel
 const panel = $('panel'), body = $('p-body'), acts = $('p-acts');
+let panelAt = { x: 0, z: 0 };
 function openPanel(audio, auto) {
+  panelAt = { x: me.x, z: me.z };
   panel.hidden = false; panel.scrollTop = 0;
   requestAnimationFrame(() => panel.classList.add('on'));
   setTrack(audio);
-  if (audio && auto && guide) play();
+  if (audio && auto && voiceOn) play();
   const r = panel.getBoundingClientRect();
   if (wide()) { shiftTX = r.width / 2 + 10; shiftTY = 0; } else { shiftTX = 0; shiftTY = Math.min(r.height, innerHeight * 0.5) / 2; }
 }
@@ -521,30 +621,46 @@ function buildPlan() {
 $('b-plan').addEventListener('click', () => { $('plan-me').setAttribute('cx', me.x); $('plan-me').setAttribute('cy', me.z); plan.showModal(); });
 plan.querySelector('[data-close]').addEventListener('click', () => plan.close());
 
+// ---------------------------------------------------------------- zoom
+// Optical zoom: the field of view narrows and yaw/pitch shift so the point under the pointer stays under the pointer.
+const tanH = f => Math.tan(THREE.MathUtils.degToRad(f / 2));
+function setZoom(z, cx, cy, now) {
+  zoomT = clamp(z, 1, zoomMax);
+  anchor = cx == null ? null : { x: cx, y: cy };
+  if (now) applyZoom(zoomT);
+  hideHint();
+}
+function applyZoom(nz) {   // move `zoom` to nz, holding the anchored direction still
+  const f0 = fovFor(zoom), f1 = fovFor(nz);
+  if (anchor && f0 !== f1) {   // solve for the yaw and pitch that keep the world direction under the pointer where it was
+    const W = innerWidth, H = innerHeight, nx = (anchor.x - (W / 2 - shiftX)) / (W / 2), ny = -(anchor.y - (H / 2 - shiftY)) / (H / 2);
+    const cam = f => { const v = [nx * tanH(f) * camera.aspect, ny * tanH(f), -1], l = Math.hypot(...v); return v.map(x => x / l); };
+    const [c0, c1] = [cam(f0), cam(f1)], cp = Math.cos(me.pitch), sp = Math.sin(me.pitch), cy = Math.cos(me.yaw), sy = Math.sin(me.yaw);
+    const ry = c0[1] * cp - c0[2] * sp, rz = c0[1] * sp + c0[2] * cp;          // c0 turned by the current pitch, then yaw
+    const d = [c0[0] * cy + rz * sy, ry, -c0[0] * sy + rz * cy];
+    const A = d[0], B = -d[2], m = Math.hypot(A, B), base = Math.atan2(B, A), off = Math.acos(clamp(c1[0] / m, -1, 1));
+    const cands = [base + off, base - off], yaw = cands.reduce((u, v) => (Math.abs(angDiff(me.yaw, v)) < Math.abs(angDiff(me.yaw, u)) ? v : u));
+    const vy = d[1], vz = d[0] * Math.sin(yaw) + d[2] * Math.cos(yaw);
+    me.yaw += angDiff(me.yaw, yaw); me.pitch = clamp(Math.atan2(vy, -vz) - Math.atan2(c1[1], -c1[2]), -0.9, 0.9);
+  }
+  zoom = nz; camera.fov = f1;
+}
+function stepZoom(dt) {
+  if (zoom === zoomT) return;
+  const l = Math.log(zoomT / zoom);
+  applyZoom(Math.abs(l) < 0.004 ? zoomT : zoom * Math.exp(l * Math.min(1, dt * 9)));
+  if (zoom === 1) anchor = null;
+}
+const zoomStep = (x, y) => setZoom(zoomT >= zoomMax * 0.55 ? 1 : zoomT * 3, x, y);
+
 // ---------------------------------------------------------------- input
 const ray = new THREE.Raycaster();
 const pick = (cx, cy) => {
   ray.setFromCamera(new THREE.Vector2(cx / innerWidth * 2 - 1, -(cy / innerHeight) * 2 + 1), camera);
   return ray.intersectObjects(solids, false)[0];
 };
-let drag = null;
-canvas.addEventListener('pointerdown', e => { if (!entered) return; canvas.setPointerCapture(e.pointerId); drag = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t: performance.now(), moved: false }; });
-canvas.addEventListener('pointermove', e => {
-  if (!entered) return;
-  if (!drag) { if (e.pointerType === 'mouse') { const h = pick(e.clientX, e.clientY); canvas.style.cursor = h && recOf.has(h.object) ? 'pointer' : 'grab'; } return; }
-  const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY;
-  if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) > 6) drag.moved = true;
-  if (!drag.moved) return;
-  const k = 0.0034 * (camera.fov / 62);
-  me.yaw += dx * k; me.pitch = clamp(me.pitch + dy * k, -0.75, 0.75);
-  if (walk) { walk.free = true; if (walk.settle) walk = null; }
-  lastInput = performance.now(); hideHint();
-});
-const release = e => {
-  if (!drag) return; const d = drag; drag = null;
-  if (d.moved || performance.now() - d.t > 500) return;
-  const h = pick(e.clientX, e.clientY); if (!h) return;
-  hideHint();
+function clickAt(cx, cy) {   // the single click: walk to the picture or the spot on the floor
+  const h = pick(cx, cy); if (!h) return;
   if (recOf.has(h.object)) { toStop(stops.findIndex(s => s.rec === recOf.get(h.object))); return; }
   if (Math.abs(h.point.y) < 0.05) {
     let { x, z } = h.point;
@@ -553,21 +669,73 @@ const release = e => {
       for (const r of walkable) { const px = clamp(x, r[0], r[1]), pz = clamp(z, r[2], r[3]), dd = Math.hypot(px - x, pz - z); if (!best || dd < best.d) best = { x: px, z: pz, d: dd }; }
       if (!best || best.d > 1.5 || !canStand(best.x, best.z)) return; x = best.x; z = best.z;
     }
-    if (focus) closePanel(true);
+    if (focus) closePanel(false);
     go({ x, z }, null, 0, null);
   }
-};
-canvas.addEventListener('pointerup', release); canvas.addEventListener('pointercancel', () => { drag = null; });
-addEventListener('keydown', e => {
-  if (!entered || plan.open || dlg.open || e.metaKey || e.ctrlKey) return;
-  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-  if (['w', 'a', 's', 'd', 'q', 'e', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(k)) { keys.add(k); e.preventDefault(); hideHint(); if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur(); }
-  else if (k === 'n' || k === 'PageDown') { e.preventDefault(); nextStop(1); }
-  else if (k === 'p' || k === 'PageUp') { e.preventDefault(); nextStop(-1); }
-  else if (k === 'Escape' && !panel.hidden) closePanel(false);
+}
+const DBL = 260;   // a second click inside this window is a double-click, not two walks
+let drag = null, pend = null;
+const ptrs = new Map(); let pinchD = 0;
+canvas.addEventListener('pointerdown', e => {
+  if (!entered) return;
+  canvas.setPointerCapture(e.pointerId); ptrs.set(e.pointerId, e);
+  if (ptrs.size === 2) { drag = null; const [a, b] = [...ptrs.values()]; pinchD = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY); if (pend) { clearTimeout(pend.timer); pend = null; } return; }
+  if (ptrs.size === 1) drag = { x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, t: performance.now(), moved: false };
 });
-addEventListener('keyup', e => keys.delete(e.key.length === 1 ? e.key.toLowerCase() : e.key));
+canvas.addEventListener('pointermove', e => {
+  if (!entered) return;
+  if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, e);
+  if (ptrs.size === 2) {   // two-finger pinch
+    const [a, b] = [...ptrs.values()], d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    if (pinchD && d) { walk = walk && walk.settle ? null : walk; setZoom(zoomT * d / pinchD, (a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2, true); }
+    pinchD = d; return;
+  }
+  if (!drag) { if (e.pointerType === 'mouse') { const h = pick(e.clientX, e.clientY); canvas.style.cursor = h && recOf.has(h.object) ? 'pointer' : 'grab'; } return; }
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY;
+  if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) > 6) drag.moved = true;
+  if (!drag.moved) return;
+  const k = 0.0034 * tanH(camera.fov) / tanH(62);   // finer drag the further in you are
+  me.yaw += dx * k; me.pitch = clamp(me.pitch + dy * k, -0.9, 0.9);
+  if (walk) { walk.free = true; if (walk.settle) walk = null; }
+  lastInput = performance.now(); hideHint();
+});
+const release = e => {
+  ptrs.delete(e.pointerId); if (ptrs.size < 2) pinchD = 0;
+  if (!drag) return; const d = drag; drag = null;
+  if (d.moved || performance.now() - d.t > 500) return;
+  hideHint();
+  const now = performance.now(), x = e.clientX, y = e.clientY;
+  if (pend && Math.hypot(pend.x - x, pend.y - y) < 28) { clearTimeout(pend.timer); pend = null; zoomStep(x, y); return; }   // double-click
+  if (pend) { clearTimeout(pend.timer); pend = null; }
+  pend = { x, y, timer: setTimeout(() => { pend = null; clickAt(x, y); }, DBL) };
+};
+canvas.addEventListener('pointerup', release);
+canvas.addEventListener('pointercancel', e => { ptrs.delete(e.pointerId); pinchD = 0; drag = null; });
+canvas.addEventListener('wheel', e => {   // wheel, and trackpad pinch (which arrives as wheel with ctrlKey)
+  if (!entered) return;
+  e.preventDefault();
+  const dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 100 : 1);
+  setZoom(zoomT * Math.exp(-dy * (e.ctrlKey ? 0.012 : 0.0016)), e.clientX, e.clientY);
+}, { passive: false });
+
+// keys: listened for on the window, whatever has focus, so a focused button or the open panel never swallows them
+const KEYS = { arrowup: 'f', w: 'f', arrowdown: 'b', s: 'b', arrowleft: 'l', q: 'l', arrowright: 'r', e: 'r', a: 'sl', d: 'sr' };
+const typing = t => t && (t.isContentEditable || /^(input|textarea|select)$/i.test(t.tagName));
+addEventListener('keydown', e => {
+  if (!entered || plan.open || dlg.open || e.metaKey || e.ctrlKey || e.altKey || typing(e.target)) return;
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
+  if (KEYS[k]) { keys.add(KEYS[k]); e.preventDefault(); hideHint(); }
+  else if (k === 'n' || k === 'pagedown') { e.preventDefault(); nextStop(1); }
+  else if (k === 'p' || k === 'pageup') { e.preventDefault(); nextStop(-1); }
+  else if (k === 'escape') { if (zoomT > 1) setZoom(1, null); else if (!panel.hidden) closePanel(false); }
+  else if (k === '+' || k === '=') { e.preventDefault(); setZoom(zoomT * 1.5, innerWidth / 2 - shiftX, innerHeight / 2 - shiftY); }
+  else if (k === '-' || k === '_') { e.preventDefault(); setZoom(zoomT / 1.5, innerWidth / 2 - shiftX, innerHeight / 2 - shiftY); }
+}, { capture: true });
+addEventListener('keyup', e => {
+  const k = KEYS[e.key.toLowerCase()]; if (k) keys.delete(k);
+}, { capture: true });
 addEventListener('blur', () => keys.clear());
+document.addEventListener('visibilitychange', () => keys.clear());
 $('t-next').addEventListener('click', () => nextStop(1));
 $('t-prev').addEventListener('click', () => nextStop(-1));
 
@@ -575,29 +743,51 @@ const hint = $('hint');
 function hideHint() { hint.classList.remove('on'); }
 
 // ---------------------------------------------------------------- textures, nearest first
-const hi = [];   // works currently holding the large texture
+// tiers: 0 thumbnail 512, 1 1280, 2 2048, 3 4000 (only for what you are looking at through the zoom)
+const TIER = ['t', 'm', 'w', 'z'], TIER_PX = [512, 1280, 2048, 4000];
+const hi = [];   // works currently holding a large texture
 async function setLevel(rec, lv) {
   if (rec.busy || rec.level === lv) return;
   rec.busy = true;
-  const t = await loadTex(rec.w[['t', 'm', 'w'][lv]]);
+  const t = await loadTex(rec.w[TIER[lv]]);
   rec.busy = false;
   if (!t) return;
   const old = rec.art.material.map;
   rec.art.material.map = t; rec.art.material.color.set('#fff'); rec.art.material.needsUpdate = true;
   if (old) old.dispose();
   rec.level = lv;
-  if (lv === 2) { hi.push(rec); if (hi.length > 5) { const o = hi.shift(); if (o !== rec) setLevel(o, 1); } }
-  else { const i = hi.indexOf(rec); if (i >= 0) hi.splice(i, 1); }
+  const i = hi.indexOf(rec); if (i >= 0) hi.splice(i, 1);
+  if (lv >= 2) {
+    hi.push(rec);
+    const big = hi.filter(r => r.level === 3);   // 4000 px textures are heavy: keep one
+    if (big.length > 1) setLevel(big[0] === rec ? big[1] : big[0], 2);
+    if (hi.length > 5) { const o = hi.find(r => r !== rec && r.level < 3) || hi[0]; if (o !== rec) setLevel(o, 1); }
+  }
 }
+const fwd = new THREE.Vector3(), toRec = new THREE.Vector3();
 function streamTextures() {
   let n = works.filter(w => w.busy).length;
-  const sp = spaceOf(me.x, me.z);
+  const sp = spaceOf(me.x, me.z), dpr = renderer.getPixelRatio();
+  camera.getWorldDirection(fwd);
+  const halfDiag = Math.atan(tanH(camera.fov) * Math.hypot(1, camera.aspect)), pxPerUnit = innerHeight * dpr / (2 * tanH(camera.fov));
+  const todo = [];
   for (const rec of works) {
-    if (n >= 3) break;
-    const d = Math.hypot(rec.pos.x - me.x, rec.pos.z - me.z), here = rec.room ? rooms.indexOf(rec.room) === sp : sp < 0;
-    const want = rec === focus || (here && d < 3.2) ? 2 : (here || d < 13 || rec.want) ? 1 : 0;
-    if (want > rec.level && !rec.busy) { setLevel(rec, want); n++; }
+    toRec.set(rec.pos.x - me.x, rec.pos.y - EYE, rec.pos.z - me.z);
+    const d = toRec.length(), here = rec.room ? rooms.indexOf(rec.room) === sp : sp < 0;
+    const seen = d > 0 && fwd.angleTo(toRec) < halfDiag + 0.15 && rec.n.dot(toRec) < 0;
+    let want = rec === focus || (here && d < 3.2) ? 2 : (here || d < 13 || rec.want) ? 1 : 0;
+    if (seen) {   // enough pixels for how big the work appears on screen
+      const px = Math.max(rec.s.ww, rec.s.wh) / d * pxPerUnit * 1.2;
+      const need = TIER_PX.findIndex(t => t >= px);
+      want = Math.max(want, need < 0 ? 3 : need === 3 ? 3 : need);
+      if (zoom >= 4 && fwd.angleTo(toRec) < THREE.MathUtils.degToRad(camera.fov) * 0.7) want = 3;   // zoomed far in on it: the sharpest tier
+      if (!here && d > 13) want = Math.min(want, 1);
+    }
+    if (rec.level === 3 && want < 3) todo.push({ rec, lv: 2, pr: -1 });   // let go of the big one when you pull back
+    else if (want > rec.level) todo.push({ rec, lv: want, pr: (seen ? 0 : 1000) + d });
   }
+  todo.sort((a, b) => a.pr - b.pr);
+  for (const t of todo) { if (n >= 3) break; if (!t.rec.busy) { setLevel(t.rec, t.lv); n++; } }
 }
 
 // ---------------------------------------------------------------- frame loop
@@ -606,8 +796,10 @@ function resize() {
   const w = innerWidth, h = innerHeight;
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
-  camera.fov = w >= h ? 62 : clamp(THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(27)) / camera.aspect)), 62, 84);
-  camera.updateProjectionMatrix();
+  baseFov = w >= h ? 62 : clamp(THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(27)) / camera.aspect)), 62, 84);
+  zoomMax = tanH(baseFov) / tanH(ZMAX_DEG);
+  zoomT = Math.min(zoomT, zoomMax); zoom = Math.min(zoom, zoomMax);
+  camera.fov = fovFor(zoom); camera.updateProjectionMatrix();
 }
 addEventListener('resize', resize);
 
@@ -617,18 +809,24 @@ function step(dt) {
     me.x = Math.sin(gateT * 0.07) * 1.2; me.z = 0.5 - ((gateT * 0.35) % 14); me.yaw = Math.sin(gateT * 0.11) * 0.12; me.pitch = 0.03;
     return;
   }
-  const mv = (keys.has('w') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('s') || keys.has('ArrowDown') ? 1 : 0);
-  const st = (keys.has('d') ? 1 : 0) - (keys.has('a') ? 1 : 0);
-  const tn = (keys.has('ArrowLeft') || keys.has('q') ? 1 : 0) - (keys.has('ArrowRight') || keys.has('e') ? 1 : 0);
-  if (mv || st || tn) {
+  const mv = (keys.has('f') ? 1 : 0) - (keys.has('b') ? 1 : 0);
+  const st = (keys.has('sr') ? 1 : 0) - (keys.has('sl') ? 1 : 0);
+  const tn = (keys.has('l') ? 1 : 0) - (keys.has('r') ? 1 : 0);
+  const ease = Math.min(1, dt * 9);
+  vel.f += (mv * 2.6 - vel.f) * ease; vel.s += (st * 2.6 - vel.s) * ease;
+  vel.t += (tn * 1.7 * clamp(tanH(camera.fov) / tanH(62), 0.15, 1.4) - vel.t) * ease;
+  if (mv || st || tn) {   // a key always takes over from a walk in progress
     if (walk) walk = null;
-    me.yaw += tn * 1.7 * dt;
-    const sp = 2.6 * dt, fx = -Math.sin(me.yaw), fz = -Math.cos(me.yaw);
-    const dx = (fx * mv - fz * st) * sp, dz = (fz * mv + fx * st) * sp;
+    if (mv || st) { zoomT = 1; anchor = null; }
+  }
+  if (Math.abs(vel.f) + Math.abs(vel.s) + Math.abs(vel.t) > 0.01) {
+    me.yaw += vel.t * dt;
+    const fx = -Math.sin(me.yaw), fz = -Math.cos(me.yaw);
+    const dx = (fx * vel.f - fz * vel.s) * dt, dz = (fz * vel.f + fx * vel.s) * dt;
     if (canStand(me.x + dx, me.z + dz)) { me.x += dx; me.z += dz; }
     else if (canStand(me.x + dx, me.z)) me.x += dx;
     else if (canStand(me.x, me.z + dz)) me.z += dz;
-    if (!tn) me.pitch += (0 - me.pitch) * Math.min(1, dt * 1.5);
+    if (!tn && (mv || st)) me.pitch += (0 - me.pitch) * Math.min(1, dt * 1.5);
   }
   if (walk && !walk.settle) {
     const q = walk.pts[walk.i], dx = q.x - me.x, dz = q.z - me.z, d = Math.hypot(dx, dz);
@@ -648,7 +846,10 @@ function step(dt) {
     if (walk.free || walk.endYaw == null || walk.t > 2.5) walk = null;
     else { me.yaw += angDiff(me.yaw, walk.endYaw) * Math.min(1, dt * 4); me.pitch += (walk.endPitch - me.pitch) * Math.min(1, dt * 4); }
   }
-  if (focus) { const p = viewPose(focus); if (Math.hypot(p.x - me.x, p.z - me.z) > 3 && !walk) closePanel(true); }
+  if (!walk && !panel.hidden) {   // wander off and the panel puts itself away; a panel for a room stays a good while longer
+    const dist = Math.hypot((focus ? viewPose(focus).x : panelAt.x) - me.x, (focus ? viewPose(focus).z : panelAt.z) - me.z);
+    if (dist > (focus ? 1.8 : 5)) closePanel(false);
+  }
   // which room are we in
   const sp = spaceOf(me.x, me.z);
   if (sp !== space) {
@@ -663,14 +864,16 @@ function step(dt) {
 function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
-  if (document.hidden || dlg.open || plan.open) return;
-  step(dt);
+  if (document.hidden) return;
+  if (dlg.open || plan.open) { keys.clear(); vel.f = vel.s = vel.t = 0; return; }
+  step(dt); stepZoom(dt);
   shiftX += (shiftTX - shiftX) * Math.min(1, dt * 5); shiftY += (shiftTY - shiftY) * Math.min(1, dt * 5);
   if (Math.abs(shiftX) > 0.5 || Math.abs(shiftY) > 0.5) camera.setViewOffset(innerWidth, innerHeight, shiftX, shiftY, innerWidth, innerHeight);
-  else camera.clearViewOffset();
+  else { if (camera.view) camera.clearViewOffset(); }
+  camera.updateProjectionMatrix();
   camera.position.set(me.x, EYE + (walk && !walk.settle ? Math.sin(now * 0.011) * 0.012 : 0), me.z);
   camera.rotation.set(me.pitch, me.yaw, 0, 'YXZ');
-  if ((tick++ & 15) === 0) streamTextures();
+  if ((tick++ & 7) === 0) streamTextures();
   renderer.render(scene, camera);
 }
 
@@ -684,20 +887,19 @@ async function init() {
   await Promise.all(works.map(rec => setLevel(rec, 0)));
   const b = $('enter'); b.disabled = false; b.textContent = 'Enter the gallery';
   b.addEventListener('click', () => {
-    const quiet = $('quiet').checked;
+    startMusic();
     document.body.classList.add('fade');
     setTimeout(() => {
       entered = true; me.x = 0; me.z = 8.6; me.yaw = 0; me.pitch = 0; space = -2;
       $('gate').hidden = true; $('hud').hidden = false; $('where').hidden = false; $('tour').hidden = false;
       document.body.classList.remove('fade'); canvas.style.cursor = 'grab';
       hint.textContent = matchMedia('(pointer: coarse)').matches
-        ? 'Drag to look around. Tap the floor or a picture to walk to it.'
-        : 'Drag to look around. Click the floor or a picture to walk to it. Arrow keys and W A S D also move you.';
-      hint.hidden = false; requestAnimationFrame(() => hint.classList.add('on')); setTimeout(hideHint, 14000);
-      if (quiet) { guide = false; $('b-guide').textContent = 'Audio guide off'; $('b-guide').setAttribute('aria-pressed', false); }
+        ? 'Drag to look around. Tap the floor or a picture to walk to it. Pinch or double-tap to zoom.'
+        : 'Drag to look around. Click the floor or a picture to walk there. Scroll or double-click to zoom. Arrow keys also move you.';
+      hint.hidden = false; requestAnimationFrame(() => hint.classList.add('on')); setTimeout(hideHint, 16000);
       showWelcome();
     }, 650);
   }, { once: true });
 }
-window.antara = { me, toStop, go };
+window.antara = { me, toStop, go, camera, setZoom, state: () => ({ zoom, zoomT, voiceOn, musicOn, musicLive, vol: music ? music.volume : null, walking: !!walk }), works };
 init();

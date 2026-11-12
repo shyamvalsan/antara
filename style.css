@@ -20,8 +20,8 @@ body.walk.fade::after { opacity:1; }
   background:linear-gradient(rgba(11,11,10,.55), rgba(11,11,10,0)); }
 #hud > * { pointer-events:auto; }
 .mark { font:400 1.05rem/1 var(--serif); letter-spacing:.3em; text-transform:uppercase; text-decoration:none; }
-#hud nav { display:flex; gap:.4rem; flex-wrap:wrap; justify-content:flex-end; }
-#hud nav button, #hud nav a { background:rgba(17,16,14,.55); border:1px solid var(--line); padding:.42rem .8rem; font-size:.84rem;
+#hud nav { display:flex; gap:.4rem; flex-wrap:wrap; justify-content:flex-end; align-items:center; }
+#hud nav button, #hud nav a { background:rgba(17,16,14,.72); border:1px solid var(--line); padding:.42rem .8rem; font-size:.84rem;
   text-decoration:none; backdrop-filter:blur(8px); border-radius:2px; }
 #hud nav button:hover, #hud nav a:hover { background:rgba(17,16,14,.9); border-color:var(--paper); }
 
@@ -39,13 +39,23 @@ body.walk.fade::after { opacity:1; }
 #enter:disabled { background:transparent; color:var(--dim); border:1px solid var(--line); cursor:progress; }
 #enter:not(:disabled):hover { background:#fff; }
 .fine { color:var(--dim); font-size:.84rem; margin:1.1rem 0 0; }
-.fine label { white-space:nowrap; margin-left:.4rem; }
+
+/* the two sound toggles: filled when on, outlined and struck through when off */
+.sounds { display:inline-flex; gap:.4rem; }
+.snd { display:inline-flex; align-items:center; gap:.45rem; line-height:1; }
+.snd svg { width:1.15rem; height:1.15rem; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; flex:none; }
+.snd .off { display:none; }
+.snd[aria-pressed="false"] { color:#C8C3B8; }
+.snd[aria-pressed="false"] .off { display:inline; }
+.snd[aria-pressed="false"] .w { display:none; }
+#hud nav .snd[aria-pressed="true"], #closer .snd[aria-pressed="true"], #plan .snd[aria-pressed="true"] { background:var(--paper); color:var(--ink); border-color:var(--paper); }
+#hud nav .snd[aria-pressed="true"]:hover { background:#fff; }
 
 #where { position:fixed; left:1.25rem; bottom:max(1.1rem, env(safe-area-inset-bottom)); margin:0; z-index:4; pointer-events:none;
   text-shadow:0 1px 10px rgba(0,0,0,.8); max-width:44vw; }
 #where b { display:block; font:400 1.15rem/1.25 var(--serif); }
 #where span { font-size:.84rem; font-style:italic; color:#D6D2C9; }
-#hint { position:fixed; left:1.25rem; top:4.4rem; margin:0; z-index:4; background:var(--glass); padding:.6rem 1rem;
+#hint { position:fixed; left:1.25rem; top:4.4rem; margin:0; z-index:4; background:rgba(17,16,14,.9); border:1px solid var(--line); padding:.6rem 1rem;
   font-size:.88rem; border-radius:2px; opacity:0; transition:opacity .6s; pointer-events:none; max-width:min(26rem, calc(100vw - 2.5rem)); }
 #hint.on { opacity:1; }
 
@@ -84,7 +94,7 @@ dialog::backdrop { background:rgba(0,0,0,.8); }
 #closer img { position:absolute; left:0; top:0; transform-origin:0 0; max-width:none; user-select:none; }
 #closer .bar { display:flex; gap:.5rem; align-items:center; padding:.7rem 1rem; border-top:1px solid var(--line); }
 #closer .cap { flex:1; margin:0; font-size:.86rem; color:var(--dim); }
-#closer button, #plan button[data-close] { background:none; border:1px solid var(--line); padding:.5rem .9rem; font-size:.86rem; border-radius:2px; }
+#closer button, #plan button[data-close], #plan .snd { background:none; border:1px solid var(--line); padding:.5rem .9rem; font-size:.86rem; border-radius:2px; }
 #plan { width:min(46rem, calc(100vw - 2rem)); max-height:calc(100dvh - 2rem); background:#141311; border:1px solid var(--line); }
 .plan-in { padding:1.6rem; display:grid; grid-template-columns:minmax(0, 1fr) minmax(0, 1.1fr); gap:1.2rem 1.8rem; align-items:start; }
 .plan-in h2 { font:400 1.5rem var(--serif); margin:0; grid-column:1 / -1; }
@@ -101,6 +111,8 @@ dialog::backdrop { background:rgba(0,0,0,.8); }
 #plan-list button:hover { text-decoration:underline; }
 #plan-list span { font-size:.86rem; font-style:italic; color:var(--dim); }
 #plan button[data-close] { grid-column:1 / -1; justify-self:start; }
+.plan-in .sounds { grid-column:1 / -1; margin-top:-.6rem; }
+#closer .bar { flex-wrap:wrap; } #closer .cap { flex:1 1 12rem; }
 .nojs { position:fixed; inset:auto 1rem 1rem; z-index:40; background:var(--glass); padding:1rem; }
 
 @media (max-width:819px) {
@@ -109,8 +121,12 @@ dialog::backdrop { background:rgba(0,0,0,.8); }
   #where { bottom:auto; top:3.6rem; max-width:70vw; }
   #tour { left:1rem; right:1rem; z-index:8; } #tour button { flex:1; }
   .mark { font-size:.9rem; } #hud nav a { display:none; }
+  #hud { padding-left:1rem; padding-right:1rem; gap:.5rem; }
+  #hud nav button { padding:.42rem .6rem; }
+  .snd .lbl { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+  #hud .snd { padding:.5rem .55rem; } #hud .snd svg { width:1.25rem; height:1.25rem; }
   .plan-in { grid-template-columns:1fr; } #plan-svg { max-height:38vh; }
-  #hint { top:7.4rem; }
+  #hint { top:9rem; }
 }
 @media (prefers-reduced-motion:reduce) { #panel, #hint, body.walk::after { transition:none; } }
 
