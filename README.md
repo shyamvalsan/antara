@@ -2,7 +2,7 @@
 
 A gallery for work that stays with you
 
-Antara is a walkable gallery: you move through a long hall and 6 rooms, one for each artist, and stand in front of 22 pictures, each with a short text, a recording and the program that made it.
+Antara is a walkable gallery: you move through a long hall and 6 rooms, one for each artist, and stand in front of 24 pictures, each with a short text, a recording and the program that made it.
 
 It is entirely imagined. The gallery, its curator, the six artists and their lives, the exhibition texts, the building and every picture were conceived and made by Fable 5.2, an AI model, as an experiment by Shyam Sreevalsan. The artists are fictional. The places and trades they come from are real.
 
@@ -18,12 +18,14 @@ Every artwork is one self-contained Python program that computes the picture. Th
 | --- | --- | --- | ---: |
 | Hanle, three hours, the pole keeps still | Stanzin Dolkar | [hanle_three_hours_the_pole_keeps_still.py](code/dolkar/hanle_three_hours_the_pole_keeps_still.py) | 1,343 |
 | Tso Moriri, new moon, the river comes down to the water | Stanzin Dolkar | [tso_moriri_new_moon_the_river_comes_down_to_the_water.py](code/dolkar/tso_moriri_new_moon_the_river_comes_down_to_the_water.py) | 966 |
+| Hanle, the night the sky went red | Stanzin Dolkar | [hanle_the_night_the_sky_went_red.py](code/dolkar/hanle_the_night_the_sky_went_red.py) | 1,770 |
 | Udo channel, kelp, the current turning | Go Sun-deok | [udo_channel_kelp_the_current_turning.py](code/sundeok/udo_channel_kelp_the_current_turning.py) | 777 |
 | Twelve metres, the abalone wall, breath nearly gone | Go Sun-deok | [twelve_metres_the_abalone_wall_breath_nearly_gone.py](code/sundeok/twelve_metres_the_abalone_wall_breath_nearly_gone.py) | 890 |
 | Winter 1971, a whale went under me | Go Sun-deok | [winter_1971_a_whale_went_under_me.py](code/sundeok/winter_1971_a_whale_went_under_me.py) | 917 |
 | Under the float, looking up | Go Sun-deok | [under_the_float_looking_up.py](code/sundeok/under_the_float_looking_up.py) | 755 |
 | Kund, three thousand five hundred steps, one going down | Ruhi Vaghela | [kund_three_thousand_five_hundred_steps_one_going_down.py](code/ruhi/kund_three_thousand_five_hundred_steps_one_going_down.py) | 935 |
 | Vav, the seventh storey down, noon in May | Ruhi Vaghela | [vav_the_seventh_storey_down_noon_in_may.py](code/ruhi/vav_the_seventh_storey_down_noon_in_may.py) | 1,350 |
+| Kuvo, from the water, looking up | Ruhi Vaghela | [kuvo_from_the_water_looking_up.py](code/ruhi/kuvo_from_the_water_looking_up.py) | 1,424 |
 | Sala de espera, Aduana, 25:00 | Halina Mróz Quispe | [sala_de_espera_aduana_2500.py](code/halina/sala_de_espera_aduana_2500.py) | 890 |
 | Escalera 3, marea alta | Halina Mróz Quispe | [escalera_3_marea_alta.py](code/halina/escalera_3_marea_alta.py) | 1,213 |
 | Salar, puerta, mediodía | Halina Mróz Quispe | [salar_puerta_mediodia.py](code/halina/salar_puerta_mediodia.py) | 739 |
