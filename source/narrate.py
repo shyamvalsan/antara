@@ -16,32 +16,72 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 OUT = ROOT / "audio"
 P = tomllib.loads((ROOT / "curator" / "programme.toml").read_text(encoding="utf-8"))
-MODEL = "eleven_turbo_v2_5"
-# One voice per speaker (ElevenLabs voice id, speed). Leela speaks the welcome
-# and each exhibition's introduction; each maker speaks about their own works.
+MODEL = "eleven_v4"
+# One voice per speaker (ElevenLabs voice ids; the makers' are Voice Library
+# voices added to the account). Leela speaks the welcome and each exhibition's
+# introduction; each maker speaks about their own works.
 VOICES = {
-    "Leela": ("pFZP5JQG7iQjIQuC4Bku", 0.95),
-    "Stanzin Dolkar": ("EXAVITQu4vr4xnSDxMaL", 0.95),
-    "Go Sun-deok": ("XrExE9yKIg1WjnnlVkGX", 0.88),
-    "Ruhi Vaghela": ("hpp4J3VqNfWAUOO0d1Us", 0.95),
-    "Halina Mróz Quispe": ("Xb7hH8MSUJpSbSDYk0k2", 0.92),
-    "Tobi Adeyemi": ("bIHbv24MWmeRgasZH58o", 1.0),
-    "Ilanji": ("pqHfZKP75CvOlQylNhV4", 0.9),
+    "Leela": "pFZP5JQG7iQjIQuC4Bku",
+    "Stanzin Dolkar": "T6T157Ans2FrOfpaKzCO",
+    "Go Sun-deok": "Zjb2Dbq5IbWDKpVOllIo",
+    "Ruhi Vaghela": "OIIrFPBzLAigdcttMGWZ",
+    "Halina Mróz Quispe": "pTX8uGyVgHCWLj6IkcbC",
+    "Tobi Adeyemi": "LEvd0YiWkwZ6hTZOmdVE",
+    "Ilanji": "ybsn8GUgoNB8oDLyFqwG",
+}
+# Direction for the voice: how each speaker talks, and a few lines that get
+# their own tone. Bracketed tags are read by the model as direction, not text.
+BASE = {
+    "Leela": "[Warm, low, unhurried]",
+    "Stanzin Dolkar": "[Quiet, dry, matter of fact]",
+    "Go Sun-deok": "[Old woman, blunt, slow]",
+    "Ruhi Vaghela": "[Warm, precise, a little teasing]",
+    "Halina Mróz Quispe": "[Dry, deadpan, official]",
+    "Tobi Adeyemi": "[Quick, warm, confident]",
+    "Ilanji": "[Old man, gentle, slow, tender]",
+}
+LINES = {
+    "I am not going to tell you which.": "[faintly amused]",
+    "Then step back and let the whole wheel turn.": "[softly]",
+    "This does not happen here.": "[with quiet wonder]",
+    "Whoever was awake in there saw it too.": "[softly]",
+    "Then it was light again.": "[softly]",
+    "That was the best thing about it.": "[with a small laugh]",
+    "The light at the top always looks nearer than it is.": "[tired, tender]",
+    "That is the picture.": "[quietly]",
+    "My father used to say": "[fondly]",
+    "Now find her.": "[quietly]",
+    "Then look at the sky again": "[softly]",
+    "Then check the window.": "[a touch amused]",
+    "It does one thing, everywhere, always.": "[slowly]",
+    "It is not. It is behind you": "[firmly]",
+    "It is where I went down in 2022.": "[quieter]",
+    "That one I do not answer.": "[quietly]",
+    "because I looked at it twice": "[amused]",
+    "My grandmother lit one like it every dusk.": "[softly]",
+    "Please do not.": "[very gently]",
+    "I drew a lamp.": "[softly]",
+    "Will they leave a grove alone?": "[wondering]",
+    "The lamp is still lit.": "[softly]",
 }
 
 # Respellings for the voice only; the printed text is never changed.
-SAY = {"25:00": "twenty-five o'clock"}
+SAY = {"25:00": "twenty-five o'clock", "Tso Moriri": "So Moriri", "Thrikkarthika": "Thrik-kaar-thika",
+       "Go Sun-deok": "Go Soon-duk", "Kavu": "Kaavu", "kavu": "kaavu", "Kuvo": "Koovo", "kuvo": "koovo",
+       "Vav": "Vaav", "Kund": "Koond"}
 
 
 def spoken(text):
+    who = SPEAKER.get(text, "Leela")
     for k in sorted(SAY, key=len, reverse=True):
         text = re.sub(rf"(?<!\w){re.escape(k)}(?!\w)", SAY[k], text)
-    return text
+    for k, tag in LINES.items():
+        text = text.replace(k, f"{tag} {k}")
+    return f"{BASE[who]} {text.strip()}"
 
 
 def key(text):
-    v, s = SPEAKER.get(text, VOICES["Leela"])
-    return hashlib.sha1(f"{v}|{MODEL}|{s}|{spoken(text)}".encode()).hexdigest()[:14]
+    return hashlib.sha1(f"{VOICES[SPEAKER.get(text, 'Leela')]}|{MODEL}|{spoken(text)}".encode()).hexdigest()[:14]
 
 
 def items():
@@ -55,7 +95,7 @@ def items():
 SPEAKER = {}
 for _e in P["exhibition"]:
     for _w in _e["work"]:
-        SPEAKER[f'{_w["title"]}.\n\n{_w["story"]}'] = VOICES[_e["artist"]]
+        SPEAKER[f'{_w["title"]}.\n\n{_w["story"]}'] = _e["artist"]
 
 
 def main():
@@ -70,12 +110,11 @@ def main():
         if os.environ.get("DRY"):
             return
         for name, text in todo:
-            v, s = SPEAKER.get(text, VOICES["Leela"])
-            body = json.dumps({"text": spoken(text).strip(), "model_id": MODEL,
-                               "voice_settings": {"stability": 0.5, "similarity_boost": 0.75, "style": 0.0, "speed": s}}).encode()
-            rq = urllib.request.Request(f"https://api.elevenlabs.io/v1/text-to-speech/{v}?output_format=mp3_44100_96",
+            v = VOICES[SPEAKER.get(text, "Leela")]
+            body = json.dumps({"text": spoken(text), "model_id": MODEL}).encode()
+            rq = urllib.request.Request(f"https://api.elevenlabs.io/v1/text-to-speech/{v}?output_format=mp3_44100_128",
                                         data=body, headers={"xi-api-key": api, "Content-Type": "application/json"})
-            with urllib.request.urlopen(rq, timeout=180) as r:
+            with urllib.request.urlopen(rq, timeout=300) as r:
                 (OUT / f"{key(text)}.mp3").write_bytes(r.read())
             print(f"spoke {name}")
     used = set()
