@@ -70,14 +70,29 @@ export function loadHearts() {
   return heartsLoad;
 }
 
-async function toggle(slug, btn) {
-  if (pending.has(slug)) return;
+let toastEl = null, toastT = 0;
+/** A brief, quiet line at the foot of the screen. */
+export function toast(text, ms = 2200) {
+  if (!toastEl) { toastEl = el('p', 'toast'); toastEl.setAttribute('role', 'status'); document.body.append(toastEl); }
+  toastEl.textContent = text; toastEl.classList.add('on');
+  clearTimeout(toastT); toastT = setTimeout(() => toastEl.classList.remove('on'), ms);
+}
+const thankedBefore = () => { try { return localStorage.getItem('antara.thanked') === '1'; } catch { return true; } };
+const markThanked = () => { try { localStorage.setItem('antara.thanked', '1'); } catch {} };
+
+export const isHearted = slug => mine.has(slug);
+/** Heart or un-heart `slug`. Resolves to the new state. */
+export async function toggle(slug, btn) {
+  if (pending.has(slug)) return mine.has(slug);
   pending.add(slug);
   const was = mine.has(slug), prev = counts.get(slug) || 0, on = !was;
   if (on) mine.add(slug); else mine.delete(slug);
   counts.set(slug, Math.max(0, prev + (on ? 1 : -1)));
   paint(slug);
-  if (on && btn) { btn.classList.remove('pulse'); void btn.offsetWidth; btn.classList.add('pulse'); }
+  if (on) {
+    for (const b of live.get(slug) || []) if (b.tagName === 'BUTTON' && b.isConnected) { b.classList.remove('pulse'); void b.offsetWidth; b.classList.add('pulse'); }
+    if (!thankedBefore()) { markThanked(); toast('Thank you'); }
+  }
   const r = await call('/hearts/' + encodeURIComponent(slug), { visitor: visitorId(), on });
   pending.delete(slug);
   if (r && r.ok && r.data && typeof r.data.count === 'number') {
@@ -88,12 +103,14 @@ async function toggle(slug, btn) {
     if (was) mine.add(slug); else mine.delete(slug);
   }
   paint(slug);
+  return mine.has(slug);
 }
 
-/** A working heart button for a work. */
-export function heartButton(slug) {
-  const b = el('button', 'heart'); b.type = 'button'; b.setAttribute('aria-label', 'Heart this work'); b.setAttribute('aria-pressed', 'false');
-  b.append(heartSvg(), el('span', 'n'));
+/** A working heart button. o.noun: 'work' (default) or 'artist'; o.cls: extra classes; o.text: visible words beside the heart; o.hint: extra text for the tooltip. */
+export function heartButton(slug, o = {}) {
+  const noun = o.noun || 'work', label = `Heart this ${noun}`;
+  const b = el('button', 'heart' + (o.cls ? ' ' + o.cls : '')); b.type = 'button'; b.setAttribute('aria-label', label); b.title = label + (o.hint || ''); b.setAttribute('aria-pressed', 'false');
+  b.append(heartSvg()); if (o.text) b.append(el('span', 't', o.text)); b.append(el('span', 'n'));
   b.addEventListener('click', () => toggle(slug, b));
   b.addEventListener('animationend', () => b.classList.remove('pulse'));
   track(slug, b); return b;
@@ -104,19 +121,36 @@ export function heartBadge(slug) {
 }
 /** Plain page: fill every <span data-heart-slot="slug"> with a working heart button. */
 export function bindHearts(root = document) {
-  for (const s of root.querySelectorAll('[data-heart-slot]')) { const b = heartButton(s.dataset.heartSlot); s.replaceChildren(b); }
+  for (const s of root.querySelectorAll('[data-heart-slot]')) { const b = heartButton(s.dataset.heartSlot, { noun: s.dataset.noun || 'work', text: s.dataset.text || '' }); s.replaceChildren(b); }
   loadHearts();
 }
 
-// ---------------------------------------------------------------- totals
-const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
-/** Fills `node` with "N hearts, M notes", or leaves it hidden if the call fails or both are zero. */
+// ---------------------------------------------------------------- totals and visitors
+const plural = (n, w) => `${n.toLocaleString('en-US')} ${w}${n === 1 ? '' : 's'}`;
+let statsP = null;
+/** The public totals {hearts, entries, visitors}, fetched once; null if the backend cannot be reached. */
+export function fetchStats() {
+  if (!statsP) statsP = call('/stats').then(r => (r && r.ok && r.data && typeof r.data === 'object' ? r.data : null));
+  return statsP;
+}
+/** Fills `node` with "N visitors, N hearts, N notes" (parts that are zero are left out), or leaves it hidden. */
 export async function showStats(node) {
   if (!node) return;
-  const r = await call('/stats'), d = r && r.ok && r.data;
-  if (!d || !(+d.hearts || +d.entries)) return;
-  node.textContent = `${plural(+d.hearts || 0, 'heart')}, ${plural(+d.entries || 0, 'note')}`;
+  const d = await fetchStats(); if (!d) return;
+  const parts = [['visitor', +d.visitors], ['heart', +d.hearts], ['note', +d.entries]].filter(([, n]) => n > 0).map(([w, n]) => plural(n, w));
+  if (!parts.length) return;
+  node.textContent = parts.join(', ');
   node.hidden = false;
+}
+/** Counts this browser once per session. Resolves to {visitors, new} or null. */
+export async function registerVisit() {
+  try { const c = sessionStorage.getItem('antara.visit'); if (c) return JSON.parse(c); } catch {}
+  const r = await call('/visit', { visitor: visitorId() });
+  const d = r && r.ok && r.data;
+  if (!d || typeof d.visitors !== 'number') return null;
+  const out = { visitors: d.visitors, new: !!d.new };
+  try { sessionStorage.setItem('antara.visit', JSON.stringify(out)); } catch {}
+  return out;
 }
 
 // ---------------------------------------------------------------- guest book

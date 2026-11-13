@@ -1,7 +1,7 @@
 // Antara: the building, the hang, walking, and the audio guide.
 // Everything is laid out from the programme data embedded in the page.
 import * as THREE from 'three';
-import { configure, loadHearts, heartButton, heartBadge, mountGuestbook, showStats } from './community.js';
+import { configure, loadHearts, heartButton, heartBadge, mountGuestbook, showStats, fetchStats, registerVisit, toast, toggle as toggleHeart, isHearted } from './community.js';
 
 const D = JSON.parse(document.getElementById('data').textContent);
 const $ = id => document.getElementById(id);
@@ -509,13 +509,39 @@ const voice = $('voice');
 const store = { get: (k, d) => { try { const v = localStorage.getItem('antara.' + k); return v == null ? d : v === '1'; } catch { return d; } },
   set: (k, v) => { try { localStorage.setItem('antara.' + k, v ? '1' : '0'); } catch {} } };
 let voiceOn = store.get('voice', false), musicOn = store.get('music', true), playing = null;
-const MUSIC_VOL = 0.22;
-const music = D.music ? Object.assign(new Audio(), { loop: true, preload: 'auto', volume: 0 }) : null;
-let musicLive = false, musicTried = false;
-if (music) music.addEventListener('error', () => { music.dataset.bad = '1'; });
+const MUSIC_VOL = 0.22, XFADE = 3;
+// Each space (the long gallery, each room) has its own loop; a missing file falls back to the single ambient.mp3.
+// Tracks load on first need. At most two play at once: the one fading in and the one fading out.
+const avail = new Set(D.musicTracks || []);
+const tracks = new Map();   // src -> { src, el, p (0..1 position in the fade), want, starting, retry }
+const badSrc = new Set();
+let mv = 0, musicKey = 'nave', gestured = false, musicLive = false;   // mv: master music level, after ducking and the toggle
+const spaceKey = sp => (sp >= 0 ? rooms[sp].e.slug : 'nave');
+function srcFor(key) {
+  const own = avail.has(key) ? `music/${key}.mp3` : null;
+  if (own && !badSrc.has(own)) return own;
+  return D.music && !badSrc.has('ambient.mp3') ? 'ambient.mp3' : null;
+}
+const isPlaying = t => !t.el.paused || t.starting;
+function trackFor(src) {
+  let t = tracks.get(src);
+  if (!t) {
+    const el = Object.assign(new Audio(), { loop: true, preload: 'none', volume: 0 });
+    t = { src, el, p: 0, want: false, starting: false, retry: 0 };
+    el.addEventListener('error', () => { badSrc.add(src); try { el.pause(); } catch {} el.removeAttribute('src'); tracks.delete(src); });
+    tracks.set(src, t);
+  }
+  return t;
+}
+function startTrack(t) {
+  if (performance.now() < t.retry) return;
+  if (!t.el.getAttribute('src')) t.el.src = t.src;
+  t.starting = true;
+  t.el.play().then(() => { t.starting = false; musicLive = true; }).catch(() => { t.starting = false; t.retry = performance.now() + 1500; });
+}
 
-function setTrack(a) {
-  playing = a; $('player').hidden = !a;
+function setTrack(a, who) {
+  playing = a; $('player').hidden = !a; $('p-who').textContent = who || '';
   if (!a) return;
   if (voice.dataset.src !== a.src) { voice.src = a.src; voice.dataset.src = a.src; }
   $('p-bar').style.width = '0%'; $('p-time').textContent = mmss(a.dur); $('p-play').textContent = 'Listen';
@@ -530,23 +556,37 @@ voice.addEventListener('timeupdate', () => {
   $('p-bar').style.width = `${100 * voice.currentTime / d}%`; $('p-time').textContent = mmss(Math.max(0, d - voice.currentTime));
 });
 
-function startMusic() {   // browsers want a gesture first; called from every early input until it takes
-  if (!music || !musicOn || musicLive || music.dataset.bad) return;
-  if (!music.src) music.src = 'ambient.mp3';
-  music.play().then(() => { musicLive = true; }).catch(() => {});
-}
-for (const t of ['pointerdown', 'keydown', 'touchend']) addEventListener(t, startMusic, { capture: true, passive: true });
+for (const t of ['pointerdown', 'keydown', 'touchend']) addEventListener(t, () => { gestured = true; }, { capture: true, passive: true });   // browsers want a gesture first
 let lastAudio = performance.now();
-setInterval(() => {   // fade in over about 3 s, duck to a third while the voice speaks
+setInterval(() => {   // duck to a third while the voice speaks; crossfade between spaces, equal power
   const now = performance.now(), dt = Math.min(0.5, (now - lastAudio) / 1000); lastAudio = now;
-  if (!music || !musicLive) return;
   const speaking = !voice.paused && !voice.ended;
   const target = musicOn ? (speaking ? MUSIC_VOL / 3 : MUSIC_VOL) : 0;
-  const rate = target < music.volume ? MUSIC_VOL / 0.7 : MUSIC_VOL / (speaking ? 1.2 : 3);
-  music.volume = clamp(music.volume + clamp(target - music.volume, -rate * dt, rate * dt), 0, 1);
-  if (!musicOn && music.volume <= 0.002 && !music.paused) music.pause();
+  const rate = target < mv ? MUSIC_VOL / 0.7 : MUSIC_VOL / (speaking ? 1.2 : 3);
+  mv = clamp(mv + clamp(target - mv, -rate * dt, rate * dt), 0, 1);
+  const run = gestured && musicOn && !document.hidden;
+  const src = srcFor(musicKey), all = [...tracks.values()];
+  for (const t of all) t.want = t.src === src;
+  let wt = src ? tracks.get(src) : null, waiting = false;
+  const others = () => [...tracks.values()].filter(t => t !== wt && isPlaying(t)).length;
+  if (src && run && !wt && others() < 2) wt = trackFor(src);
+  if (wt && run && !isPlaying(wt)) {
+    if (others() < 2) {
+      if (!musicLive && ![...tracks.values()].some(t => t !== wt && t.p > 0)) wt.p = 1;   // the very first track: only the master level fades in
+      startTrack(wt);
+    } else waiting = true;
+  } else if (src && run && !wt) waiting = true;
+  if (run) for (const t of tracks.values()) if (!t.want && t.p > 0 && !isPlaying(t)) startTrack(t);
+  for (const t of tracks.values()) {
+    if (isPlaying(t)) {
+      if (t.want ? (t.el.readyState >= 3 && !t.starting) : true) t.p = clamp(t.p + (t.want ? 1 : -1) * dt / (waiting ? 0.8 : XFADE), 0, 1);
+      t.el.volume = clamp(mv * Math.sin(t.p * Math.PI / 2), 0, 1);
+      if (!t.want && t.p <= 0) t.el.pause();
+    }
+    if (!musicOn && mv <= 0.002 && !t.el.paused) t.el.pause();
+  }
 }, 80);
-document.addEventListener('visibilitychange', () => { if (!music || !musicLive) return; if (document.hidden) music.pause(); else if (musicOn) music.play().catch(() => {}); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) for (const t of tracks.values()) { t.starting = false; t.el.pause(); } });
 
 const SND = { voice: { on: 'Voice is on. Turn off the curator\'s voice', off: 'Voice is off. Turn on the curator\'s voice' },
   music: { on: 'Music is on. Turn off the music', off: 'Music is off. Turn on the music' } };
@@ -564,7 +604,6 @@ document.addEventListener('click', e => {
     else if (playing && !panel.hidden && voice.paused && !voice.ended) play();
   } else {
     musicOn = !musicOn; store.set('music', musicOn);
-    if (musicOn) { if (musicLive) music.play().catch(() => {}); else startMusic(); }
   }
   syncSound();
 });
@@ -572,18 +611,20 @@ syncSound();
 
 // ---------------------------------------------------------------- the panel
 const panel = $('panel'), body = $('p-body'), acts = $('p-acts');
-let panelAt = { x: 0, z: 0 };
-function openPanel(audio, auto) {
+let panelAt = { x: 0, z: 0 }, introRoom = null;
+const pTop = $('p-top'), pKick = $('p-kick'), pHeart = $('p-heart');
+function setTop(kicker, heart) { pKick.textContent = kicker; pHeart.replaceChildren(...(heart ? [heart] : [])); }
+function openPanel(audio, auto, who) {
   panelAt = { x: me.x, z: me.z };
   panel.hidden = false; panel.scrollTop = 0;
   requestAnimationFrame(() => panel.classList.add('on'));
-  setTrack(audio);
+  setTrack(audio, who);
   if (audio && auto && voiceOn) play();
   const r = panel.getBoundingClientRect();
   if (wide()) { shiftTX = r.width / 2 + 10; shiftTY = 0; } else { shiftTX = 0; shiftTY = Math.min(r.height, innerHeight * 0.5) / 2; }
 }
 function closePanel(keepAudio) {
-  panel.classList.remove('on'); panel.hidden = true; focus = null; shiftTX = shiftTY = 0;
+  panel.classList.remove('on'); panel.hidden = true; focus = null; introRoom = null; shiftTX = shiftTY = 0;
   if (!keepAudio) voice.pause();
 }
 $('p-close').addEventListener('click', () => closePanel(false));
@@ -624,8 +665,8 @@ const shareOf = {
 function setAddress(q) { try { history.replaceState(null, '', location.pathname + (q ? '?' + q : '') + location.hash); } catch {} }
 
 function codeLine(rec) {
-  const c = rec.w.code, p = el('p', 'codeline', `Computed by one program, ${c.lines.toLocaleString('en-US')} lines of Python. `);
-  p.append(btn('Read the code', () => openCode(rec), 'link'));
+  const c = rec.w.code, p = el('p', 'codeline code');
+  p.append(el('span', null, `Computed by one program: ${c.lines.toLocaleString('en-US')} lines of Python, ${c.kb} KB. `), btn('Read the code', () => openCode(rec), 'link'));
   return p;
 }
 function noteLine(rec) {
@@ -635,30 +676,34 @@ function noteLine(rec) {
 }
 function showWork(rec) {
   focus = rec; cur = stops.findIndex(s => s.rec === rec);
+  setTop(rec.e.artist, heartButton(rec.w.id, { cls: 'big', hint: ' (H)' }));
   body.replaceChildren(
-    el('p', 'kicker', rec.e.artist), el('h2', null, rec.w.title),
+    el('h2', null, rec.w.title),
     el('p', 'meta', `${rec.w.year}. ${rec.w.medium}. ${rec.w.cm[0]} × ${rec.w.cm[1]} cm`),
     ...rec.w.story.map(t => el('p', null, t)), codeLine(rec), noteLine(rec));
-  acts.replaceChildren(btn('Look closer', () => openCloser(rec)), heartButton(rec.w.id), ...sharer(shareOf.work(rec)));
+  acts.replaceChildren(btn('Look closer', () => openCloser(rec)), ...sharer(shareOf.work(rec)));
   setAddress('w=' + encodeURIComponent(rec.w.id));
-  openPanel(rec.w.audio, true);
+  openPanel(rec.w.audio, true, `In ${rec.e.artist}\u2019s own words`);
 }
 function showIntro(R) {
   const e = R.e; R.seen = true; cur = stops.findIndex(s => s.kind === 'intro' && s.room === R);
   const more = el('div', 'more'); more.hidden = true;
   more.append(el('h3', null, 'The artist'), el('p', 'meta', e.origin), ...e.bio.map(t => el('p', null, t)), ...e.said.map(t => el('blockquote', null, t)));
-  body.replaceChildren(el('p', 'kicker', 'Exhibition'), el('h2', null, e.artist), el('p', 'sub', e.title), ...e.intro.map(t => el('p', null, t)), more);
+  introRoom = R;
+  setTop('Exhibition', heartButton(e.slug, { noun: 'artist', cls: 'big', text: 'Heart this artist' }));
+  body.replaceChildren(el('h2', null, e.artist), el('p', 'sub', e.title), ...e.intro.map(t => el('p', null, t)), more);
   const b = btn('About the artist', () => { more.hidden = !more.hidden; b.textContent = more.hidden ? 'About the artist' : 'Hide'; });
   acts.replaceChildren(b, btn('Go to the first work', () => nextStop(1)), ...sharer(shareOf.room(e)));
   setAddress('x=' + encodeURIComponent(e.slug));
-  openPanel(e.audio, true);
+  openPanel(e.audio, true, `${D.curator.name}, curator`);
 }
 function showWelcome() {
-  body.replaceChildren(el('p', 'kicker', `${D.curator.name}, ${D.curator.role.toLowerCase()}`), el('h2', null, `Welcome to ${D.name}`), ...D.welcome.text.map(t => el('p', null, t)));
+  setTop('Welcome', null);
+  body.replaceChildren(el('h2', null, `Welcome to ${D.name}`), ...D.welcome.text.map(t => el('p', null, t)));
   const about = el('a', null, 'About Antara'); about.href = 'about/';
   acts.replaceChildren(btn('Begin the guided walk', () => toStop(0)), about, ...sharer(shareOf.gallery));
   setAddress('');
-  openPanel(D.welcome.audio, true);
+  openPanel(D.welcome.audio, true, `${D.curator.name}, curator`);
 }
 
 // ---------------------------------------------------------------- looking closer (flat, zoomable)
@@ -777,12 +822,13 @@ function buildArtists() {
       thumbs.append(t);
     }
     const go = btn('Go to this exhibition', () => { artD.close(); if (r) toStop(stops.findIndex(s => s.kind === 'intro' && s.room === r)); }, 'primary');
-    arDetail.replaceChildren(el('h3', null, e.artist), el('p', 'ar-origin', e.origin), el('p', 'ar-show', e.title),
+    const ttl = el('div', 'ar-title'); ttl.append(el('h3', null, e.artist), heartButton(e.slug, { noun: 'artist', text: 'Heart this artist' }));
+    arDetail.replaceChildren(ttl, el('p', 'ar-origin', e.origin), el('p', 'ar-show', e.title),
       ...e.bio.map(t => el('p', null, t)), el('h4', null, e.works.length === 1 ? 'The work' : 'The works'), thumbs, go);
     arDetail.scrollTop = 0; arDetail.closest('.ar-body').scrollTop = 0;
   };
   const btns = D.exhibitions.map(e => {
-    const b = el('button', 'ar-b'); b.type = 'button'; b.append(el('b', null, e.artist), el('span', null, e.title));
+    const b = el('button', 'ar-b'); b.type = 'button'; b.append(el('b', null, e.artist), el('span', null, e.title), heartBadge(e.slug));
     b.addEventListener('click', () => pick(e, btns, b));
     const li = el('li'); li.append(b); arList.append(li); return b;
   });
@@ -931,6 +977,7 @@ addEventListener('keydown', e => {
   if (!entered || plan.open || dlg.open || codeD.open || artD.open || gbD.open || e.metaKey || e.ctrlKey || e.altKey || typing(e.target)) return;
   const k = e.key.length === 1 ? e.key.toLowerCase() : e.key.toLowerCase();
   if (KEYS[k]) { keys.add(KEYS[k]); e.preventDefault(); hideHint(); }
+  else if (k === 'h') { e.preventDefault(); if (!e.repeat) heartInFront(); }
   else if (k === 'n' || k === 'pagedown') { e.preventDefault(); nextStop(1); }
   else if (k === 'p' || k === 'pageup') { e.preventDefault(); nextStop(-1); }
   else if (k === 'escape') { if (zoomT > 1) setZoom(1, null); else if (!panel.hidden) closePanel(false); }
@@ -952,6 +999,7 @@ function hideHint() { hint.classList.remove('on'); }
 const keysEl = $('keys'), coarse = matchMedia('(pointer: coarse)').matches;
 const used = { key: 0, wheel: 0, drag: 0, pinch: 0 };
 let wheelAt = 0;
+keysEl.title = 'H hearts the work in front of you';
 if (store.get('knowsControls', false)) keysEl.classList.add('quiet');
 function usedControl(k) {
   used[k]++;
@@ -1007,6 +1055,50 @@ function streamTextures() {
   }
   todo.sort((a, b) => a.pr - b.pr);
   for (const t of todo) { if (n >= 3) break; if (!t.rec.busy) { setLevel(t.rec, t.lv); n++; } }
+}
+
+// ---------------------------------------------------------------- hearts in the room
+// While you stand at a work, a small heart floats just below the right-hand corner of its frame (never over the picture).
+// H hearts or un-hearts the same work; with a room's introduction open and no work in front of you, H hearts the artist.
+const floatBox = $('fhearts');
+function buildFloats() { for (const rec of works) { rec.fh = heartButton(rec.w.id, { cls: 'float', hint: ' (H)' }); rec.fh.hidden = true; floatBox.append(rec.fh); } }
+const ahead = new THREE.Vector3(), tmpP = new THREE.Vector3(), fwdH = new THREE.Vector3();
+let heartRec = null;
+function findHeartRec() {
+  if (!entered || walk && !walk.settle) return null;
+  if (focus) return focus;
+  camera.getWorldDirection(fwdH);
+  let best = null, bs = 0.5;   // within a cone of about 55 degrees, standing in front of it
+  const sp = spaceOf(me.x, me.z);
+  for (const rec of works) {
+    if (rec.room ? rooms.indexOf(rec.room) !== sp : sp >= 0) continue;
+    ahead.set(rec.pos.x - me.x, 0, rec.pos.z - me.z);
+    const d = ahead.length(); if (d > Math.max(7, rec.maxDist)) continue;
+    if (rec.n.x * -ahead.x + rec.n.z * -ahead.z <= 0) continue;   // seen from the front only
+    ahead.divideScalar(d || 1);
+    const sc = fwdH.x * ahead.x + fwdH.z * ahead.z - d * 0.02;
+    if (sc > bs) { bs = sc; best = rec; }
+  }
+  return best;
+}
+function placeHearts() {
+  heartRec = findHeartRec();
+  for (const rec of works) {
+    const b = rec.fh; let show = rec === heartRec && !(panel.hidden === false && !wide());
+    if (show) {
+      const rx = rec.n.z, rz = -rec.n.x;   // along the wall, to the right as seen from the front (UP x n)
+      tmpP.set(rec.pos.x + rx * rec.s.fw / 2 + rec.n.x * 0.06, rec.y - rec.s.fh / 2, rec.pos.z + rz * rec.s.fw / 2 + rec.n.z * 0.06).project(camera);
+      const x = (tmpP.x * 0.5 + 0.5) * innerWidth, y = (-tmpP.y * 0.5 + 0.5) * innerHeight;
+      if (tmpP.z > 1 || tmpP.z < -1 || x < 40 || x > innerWidth - 8 || y < 70 || y > innerHeight - 90) show = false;
+      else { b.style.transform = `translate(${Math.round(x - b.offsetWidth)}px, ${Math.round(y + 10)}px)`; }
+    }
+    if (b.hidden === show) b.hidden = !show;
+  }
+}
+function heartInFront() {
+  if (heartRec) { toggleHeart(heartRec.w.id); return; }
+  if (!panel.hidden && introRoom) { toggleHeart(introRoom.e.slug); return; }
+  toast('Stand in front of a work to heart it');
 }
 
 // ---------------------------------------------------------------- frame loop
@@ -1072,7 +1164,7 @@ function step(dt) {
   // which room are we in
   const sp = spaceOf(me.x, me.z);
   if (sp !== space) {
-    space = sp;
+    space = sp; musicKey = spaceKey(sp);
     const w = $('where');
     if (sp >= 0) { const r = rooms[sp]; w.replaceChildren(el('b', null, r.e.artist), el('span', null, r.e.title)); }
     else w.replaceChildren(el('b', null, 'The long gallery'), el('span', null, `${D.season}, ${D.dates}`));
@@ -1093,20 +1185,23 @@ function frame(now) {
   camera.position.set(me.x, EYE + (walk && !walk.settle ? Math.sin(now * 0.011) * 0.012 : 0), me.z);
   camera.rotation.set(me.pitch, me.yaw, 0, 'YXZ');
   if ((tick++ & 7) === 0) streamTextures();
+  camera.updateMatrixWorld();
+  placeHearts();
   renderer.render(scene, camera);
 }
 
 // ---------------------------------------------------------------- opening
 async function init() {
   resize(); loadHearts();
+  fetchStats().then(d => { const n = d && +d.visitors; if (n > 0) { const g = $('gate-visits'); g.textContent = `${n.toLocaleString('en-US')} ${n === 1 ? 'person has' : 'people have'} walked through`; g.hidden = false; } });
   try { await Promise.all([document.fonts.load('40px Marcellus'), document.fonts.load('300 20px "Albert Sans"'), document.fonts.load('italic 20px "Albert Sans"'), document.fonts.load('600 20px "Albert Sans"')]); } catch {}
-  rooms.forEach(buildRoom); buildNave(); buildCollision(); buildStops(); buildPlan(); buildArtists();
+  rooms.forEach(buildRoom); buildNave(); buildFloats(); buildCollision(); buildStops(); buildPlan(); buildArtists();
   const mirror = world.clone(true); mirror.scale.y = -1; scene.add(mirror);
   requestAnimationFrame(frame);
   await Promise.all(works.map(rec => setLevel(rec, 0)));
   const b = $('enter'); b.disabled = false; b.textContent = 'Enter the gallery';
   b.addEventListener('click', () => {
-    startMusic();
+    gestured = true;
     document.body.classList.add('fade');
     setTimeout(() => {
       entered = true; me.x = 0; me.z = 8.6; me.yaw = 0; me.pitch = 0; space = -2;
@@ -1117,11 +1212,12 @@ async function init() {
         : 'Drag to look around. Click the floor or a picture to walk there. Scroll or double-click to zoom. Arrow keys also move you.';
       hint.hidden = false; requestAnimationFrame(() => hint.classList.add('on')); setTimeout(hideHint, 16000);
       keysEl.hidden = false;
+      registerVisit().then(v => { if (v && v.new) toast(`You are visitor ${v.visitors.toLocaleString('en-US')}`, 5000); });
       const q = new URLSearchParams(location.search), wid = q.get('w'), xid = q.get('x');
       const at = wid ? stops.findIndex(s => s.kind === 'work' && s.rec.w.id === wid) : xid ? stops.findIndex(s => s.kind === 'intro' && s.room.e.slug === xid) : -1;
       if (at >= 0) toStop(at); else showWelcome();
     }, 650);
   }, { once: true });
 }
-window.antara = { me, toStop, go, camera, setZoom, state: () => ({ zoom, zoomT, voiceOn, musicOn, musicLive, vol: music ? music.volume : null, walking: !!walk }), works };
+window.antara = { me, toStop, go, camera, setZoom, state: () => ({ zoom, zoomT, voiceOn, musicOn, musicLive, mv, musicKey, tracks: [...tracks.values()].map(t => ({ src: t.src, p: +t.p.toFixed(3), want: t.want, playing: !t.el.paused, vol: +t.el.volume.toFixed(3), t: +t.el.currentTime.toFixed(1) })), walking: !!walk, heartRec: heartRec && heartRec.w.id }), works, rooms: rooms.map(r => ({ slug: r.e.slug, x: (r.xNear + r.xFar) / 2, z: r.zc })) };
 init();

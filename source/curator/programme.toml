@@ -1,0 +1,419 @@
+# The programme of Antara, as Leela has hung it.
+# The website is built from this file:
+#     .venv/bin/python narrate.py     (audio guide; only new or changed texts are spoken)
+#     .venv/bin/python build.py       (site/)
+# To change the roster, add or remove an [[exhibition]] block. Exhibitions take
+# rooms off the long gallery in the order they appear here, alternating left and
+# right. In each exhibition, list works in walking order (clockwise from the
+# door) and mark one `hero = true`: it takes the far wall, facing the doorway.
+# A work with `nave = true` hangs alone on the end wall of the long gallery.
+
+[gallery]
+name = "Antara"
+line = "A gallery for work that stays with you"
+season = "Winter programme"
+dates = "12 November 2026 to 28 February 2027"
+description = "Antara is a gallery you walk through. Six solo exhibitions, hung by Leela, with an audio guide to every work."
+voice = "bf_emma"
+speed = 0.94
+
+[curator]
+name = "Leela"
+role = "Director and curator"
+bio = '''
+Leela was born in Fort Kochi in 1973. She trained as a paintings conservator in London and spent eight years at the bench, on panel paintings and then on South Asian manuscripts, before moving to curating. She was senior curator of a museum collection in Rotterdam and, from 2012 to 2024, chief curator of a private museum in Mumbai.
+
+She founded Antara in 2026 to show a kind of work she could not place in a museum: pictures made entirely by written instruction, in which the maker specifies a world, its light and the hand that paints it. As a conservator she spent years reconstructing how painters built light in layers. Here those decisions are written down.
+
+Antara means the interval between two things, and also what is within. She uses it for the distance between a person and a picture.
+'''
+said = [
+  "I am not interested in how it was made until I have forgotten to ask.",
+  "A good room has one more wall than it has pictures.",
+  "Stand further back than you think. Then come much closer than is polite.",
+]
+welcome = '''
+Welcome to Antara. I am Leela, and I hung these rooms.
+
+You are standing in the long gallery. Six exhibitions open off it, three on each side, and each belongs to one maker. Walk wherever you like. When you stop in front of a work, I will tell you a little about it, and then I will stop talking.
+
+I chose these pictures by one test. After you leave, does the picture stay with you? Take your time. Stand further back than you think you should. Then come much closer than is polite.
+'''
+
+# ------------------------------------------------------------------ 1, left
+[[exhibition]]
+slug = "stanzin-dolkar"
+folder = "dolkar"
+artist = "Stanzin Dolkar"
+title = "Standing in the Room"
+origin = "Hanle, Ladakh, born 1992"
+wall = "#0C0F15"
+frame = "#050608"
+intro = '''
+Stanzin Dolkar is the night assistant at an observatory in Ladakh, four and a half thousand metres up. Her work is to point a telescope at a patch of sky the size of a fingernail, for astronomers who are a thousand miles away. Then she walks outside, at two in the morning, and sees all of it.
+
+These are her skies. Nothing is photographed. Every star is placed and coloured by calculation, and the dark lanes between them are made first. Her grandmother, who herded on this plateau, had names for the dark shapes and none for the lights. Look for the one small lamp in each picture. It is there to tell you how large everything else is.
+'''
+bio = '''
+Her family are Changpa herders who winter at Hanle. She took a physics degree in Jammu and came home to the telescope in 2014. She has twice been offered a research post in the south and has twice declined.
+
+Each picture is one program. She builds a galaxy from the inside, several hundred thousand stars with their true spread of brightness and colour, cuts the dust lanes through it, lays the faint glow of the upper air over it, and then exposes it, as she says, for an eye that has been in the dark for an hour. She allows no moon and no spectacle. She signs with a star drawn by compass and the altitude in metres.
+'''
+said = [
+  "The astronomers look through a keyhole. I am the one standing in the room.",
+  "My grandmother named the dark parts. The lights were only where the dark was not.",
+  "You are not looking up at it. You are standing on a rock looking out.",
+]
+
+[[exhibition.work]]
+file = "hanle_three_hours_the_pole_keeps_still.png"
+title = "Hanle, three hours, the pole keeps still"
+medium = "Computed sky and terrain, pigment print on cotton rag"
+story = '''
+Three hours of one night, above the monastery at Hanle, where I grew up. Every star has drawn the path it travelled while I stood there. They all turn about one point, and the star nearest that point has hardly moved. My people steered by it for exactly that reason.
+
+One window is lit. Someone inside is awake, with a butter lamp, under all of this. Stand close and follow a single arc from end to end. Then step back and let the whole wheel turn.
+'''
+
+[[exhibition.work]]
+file = "tso_moriri_new_moon_the_river_comes_down_to_the_water.png"
+title = "Tso Moriri, new moon, the river comes down to the water"
+medium = "Computed sky and terrain, pigment print on cotton rag"
+hero = true
+story = '''
+A lake at four and a half thousand metres, on a night with no moon. The band across the sky is our own galaxy, seen edge on, from inside. The dark lanes in it are dust. My grandmother's people called the whole thing a river, and they named the dark shapes, not the lights.
+
+The water was so still that the river came down into it. Find the tent on the shore. It is a few millimetres of orange, and it is the only thing here made by a person. Every sky of mine holds one star more than the real sky has. I am not going to tell you which.
+'''
+
+# ----------------------------------------------------------------- 1, right
+[[exhibition]]
+slug = "go-sun-deok"
+folder = "sundeok"
+artist = "Go Sun-deok"
+title = "The Paper Is the Air"
+origin = "Hado-ri, Jeju, born 1944"
+wall = "#2B333B"
+frame = "#B7A583"
+mat = 0.09
+intro = '''
+Go Sun-deok dived for abalone off the island of Jeju for sixty-one years, on a single breath at a time. For fifty of those years she painted in ink on winter evenings, on the backs of the cooperative's ledgers, and showed nobody.
+
+Photographs of the diving women show the women. She paints what the women saw. Each sheet is one dive, with a way down and a way up. There is more bare paper than ink, because the paper is the air, and a diver does not spend air. The only colour is her seal. It reads breath, and it sits where her float would be.
+'''
+bio = '''
+Her mother dived, and her grandmother. At fifteen she went out with the women. A diver's whole skill, she says, is knowing to the second how much breath is left, and never taking the one last shell that would cost it.
+
+The cold finished her wrists in 2022. Her granddaughter, who builds models of the ocean at the university, sat with her through a winter and wrote down how she paints: how wet, how fast, where the brush lifts, how long to wait. Sun-deok does not touch the machine. She says what is wrong with the picture, and the numbers are changed. There is no white paint and no correction. A sheet that is wrong is begun again.
+'''
+said = [
+  "You do not look at the sea. You are in it or you are not.",
+  "The paper is the air. Do not spend it.",
+  "My hands are finished. My eyes went down for sixty years. Those still work.",
+]
+
+[[exhibition.work]]
+file = "udo_channel_kelp_the_current_turning.png"
+title = "Udo channel, kelp, the current turning"
+medium = "Ink on mulberry paper, laid by program"
+story = '''
+Look at the kelp. Low down it leans one way. Higher up it leans the other. That is how you know the current has turned, a moment before you feel it on your body. It is the moment to decide: go on, or go up.
+
+Every stalk is one stroke, from the root to the tip, without lifting. I told my granddaughter: if the stroke stops to think, the kelp dies.
+'''
+
+[[exhibition.work]]
+file = "twelve_metres_the_abalone_wall_breath_nearly_gone.png"
+title = "Twelve metres, the abalone wall, breath nearly gone"
+medium = "Ink on mulberry paper, laid by program"
+story = '''
+Twelve metres down, against a wall of black rock. The darkest ink, under each shelf, is where the abalone are. A diver is paid for what she brings up from there.
+
+The small figure is four strokes, and she has already turned away. That is me. This is the picture of the shell I did not take. In sixty-one years the sea never once kept me, because I always left it something.
+'''
+
+[[exhibition.work]]
+file = "winter_1971_a_whale_went_under_me.png"
+title = "Winter 1971, a whale went under me"
+medium = "Ink on mulberry paper, laid by program"
+hero = true
+story = '''
+Winter, 1971. I had just left my float and started down when the water under me went dark. It stayed dark for a long time. Then it was light again.
+
+This is the largest sheet I have made, and the only one where the ink outweighs the paper. You cannot see the whole animal. The paper is not big enough. Neither was the sea. Find me at the top: a few strokes beside the red seal, holding my breath. It did not notice me. That was the best thing about it.
+'''
+
+[[exhibition.work]]
+file = "under_the_float_looking_up.png"
+title = "Under the float, looking up"
+medium = "Ink on mulberry paper, laid by program"
+story = '''
+This is the bottom of a breath. I have turned, and I am looking up at where I have to go: the bright window of the surface, the rope, the round shadow of my float.
+
+Everything pale here is paper the brush never touched. The last few metres are the longest. The light at the top always looks nearer than it is.
+'''
+
+# ------------------------------------------------------------------ 2, left
+[[exhibition]]
+slug = "ruhi-vaghela"
+folder = "ruhi"
+artist = "Ruhi Vaghela"
+title = "Built Downward"
+origin = "Patan, Gujarat, born 1985"
+wall = "#D9D2C4"
+frame = "#F3F0E8"
+intro = '''
+For fifteen years Ruhi Vaghela measured the stepwells of Gujarat and Rajasthan for the state, stair by stair, first with a tape and a plumb line and later with a laser. A cathedral goes up. These buildings go down, as far as thirty metres, to reach water.
+
+She builds each well again from its measurements and puts the sun where the sun was. For a few minutes around noon, in May, one shaft of it reaches the bottom. Everything else you see is stone lit by other stone. There is one person in each picture, and she is carrying water. You will find her late, and when you do, the building will get larger.
+'''
+bio = '''
+She grew up five minutes from one of the great stepwells and played in it before it had a fence. Her father cut sandstone for temple repairs. He told her that the masons carved the lowest storey as finely as the highest, although it would lie under water for most of the year and be seen by no one.
+
+She measured about sixty wells. Each picture is a single program: the well as a solid model, stairs and pillars repeated as the masons repeated them, hard sun, soft sky, and the light that bounces between. She finishes them matte, like lime plaster. She signs with a mason's mark and the depth in metres, and the depth is true.
+'''
+said = [
+  "A temple goes up to show you the god. A well goes down to show you the water. I know which I needed more.",
+  "They carved the bottom storey for the fish.",
+  "Count the steps. That is the only way to believe it.",
+]
+
+[[exhibition.work]]
+file = "kund_three_thousand_five_hundred_steps_one_going_down.png"
+title = "Kund, three thousand five hundred steps, one going down"
+medium = "Measured stone, light computed, matte pigment print"
+story = '''
+A stepped tank, thirteen storeys deep. Three thousand five hundred steps, in pairs of small flights, so that many people could go down to the water at once and nobody would have to wait.
+
+Try to count them. You will lose your place. I did, many times, and I had a tape and a notebook. That is the picture. Then look for the woman in yellow, with a brass pot on her head. Every step you tried to count is the height of her knee.
+'''
+
+[[exhibition.work]]
+file = "vav_the_seventh_storey_down_noon_in_may.png"
+title = "Vav, the seventh storey down, noon in May"
+medium = "Measured stone, light computed, matte pigment print"
+hero = true
+story = '''
+You are inside the well, three storeys below the ground, and it goes down four more. Galleries of pillars run along both sides. Beams of stone cross in front of you, one below another, each one built to hold the walls apart against the weight of the earth.
+
+It is noon in May, the hottest hour of the hottest month, and it is cool where you are standing. The one shaft of sun has just reached the water. Far down, at the seventh storey, a woman in red is standing beside it. Her wet footprints are drying on the stair. The masons carved everything you see, including the parts that spend most of the year under water. My father used to say they carved the bottom storey for the fish.
+'''
+
+# ----------------------------------------------------------------- 2, right
+[[exhibition]]
+slug = "halina-mroz-quispe"
+folder = "halina"
+artist = "Halina Mróz Quispe"
+title = "Everything Is in Order"
+origin = "Antofagasta, born 1961"
+wall = "#D5D8D4"
+frame = "#1A1C1D"
+intro = '''
+Halina Mróz Quispe inspected shipping containers in a Chilean port, at night, for thirty-one years. Her work was to compare what a paper said was in the box with what was in the box.
+
+Each of these pictures is a declaration, and you are the inspector. Every room is built as a measured solid and lit by calculation, and everything in it is correct to the millimetre, except for one item. It is not hidden. I will not tell you which. Somewhere in each picture hangs a plumb line. It is always true, and it is there so that you know what to believe.
+'''
+bio = '''
+Her father was a ship's engineer from Gdynia who walked off a freighter in Antofagasta and never explained it. Her mother came down from a village near the Bolivian border. He taught her to draw machines in section. She taught her that the mountains were persons, and that you greet them.
+
+Before the port she worked two seasons for a survey crew on the salt flats, holding the staff and the plumb bob. She wrote her own programs, because the ones she could buy would not let her break one law of nature and keep all the others. Each picture is stamped lower left, a few degrees off level, with her initials and an hour that no clock shows.
+'''
+said = [
+  "Everything is in order. Please check again.",
+  "I do not invent. I declare one item incorrectly.",
+  "People ask what the room means. It is 6.2 metres by 9. The sun was at forty degrees.",
+]
+
+[[exhibition.work]]
+file = "sala_de_espera_aduana_2500.png"
+title = "Sala de espera, Aduana, 25:00"
+medium = "Measured room, light computed"
+story = '''
+The waiting hall of the customs house, on the night shift. I have given the hour as twenty-five o'clock. That is the hour that is worked and is not counted.
+
+Everything here is in order. The benches, the floor, the lamps, the notices. Take your time. Then check the window.
+'''
+
+[[exhibition.work]]
+file = "escalera_3_marea_alta.png"
+title = "Escalera 3, marea alta"
+medium = "Measured stairwell, light computed"
+hero = true
+story = '''
+Stair number three, at the port, at high water. One sodium lamp. The steps go down into the sea, and the boat landing is somewhere underneath.
+
+I took this stair to work for thirty-one years. Find the plumb line first, on the wall, and trust it. Then look at the water for as long as you would look at a face. Water is the most obedient thing there is. It does one thing, everywhere, always.
+'''
+
+[[exhibition.work]]
+file = "salar_puerta_mediodia.png"
+title = "Salar, puerta, mediodía"
+medium = "Measured ground, light computed"
+story = '''
+A door, standing by itself on the salt flat, at noon. I held the surveyor's staff on this ground for two seasons when I was twenty. I learned that in the heat the horizon lies and the plumb line does not.
+
+There are several shadows in this picture. Check each one against the sun. Then ask yourself why someone would stand a door where there is no wall, and whether you would open it.
+'''
+
+# ------------------------------------------------------------------ 3, left
+[[exhibition]]
+slug = "tobi-adeyemi"
+folder = "tobi"
+artist = "Tobi Adeyemi"
+title = "Eleven Seconds"
+origin = "Lagos, born 1999"
+wall = "#C9C5BC"
+frame = "#2A2925"
+intro = '''
+Tobi Adeyemi is a motorcycle dispatch rider in Lagos. He was three years into an architecture degree when the fees stopped, and he has been on the bike ever since.
+
+To get through a Lagos junction alive, a rider looks ahead, at both mirrors, down at the road and up at the bridge, and puts it all together in a few seconds. That is how he paints. Each piece of a picture is one of those looks, and each title tells you how many seconds the whole thing took. Somewhere in everything he makes there is a piece of bus yellow with two black stripes.
+'''
+bio = '''
+He was raised in Yaba by his mother, who sells cloth in Balogun market. At university he was good at the thing first-years find hardest: holding a plan, a section and an elevation in the head and knowing they are one object. Riding in Lagos turned out to be the same exercise at speed, with a hand's width on either side.
+
+He went down once, at Ojuelegba in 2022, and broke a collarbone. In the six weeks off the bike he began to draw what he had seen in the seconds before. He builds each junction as a rough model, takes his views through it, and cuts the panel along lines that are already there: a kerb, a wire, the edge of a bus. He signs with his rider number, 417.
+'''
+said = [
+  "Lagos no get one side. Why my picture go get one side?",
+  "Mirror is not the past. Mirror is behind you, now.",
+  "I no dey paint fast. I dey paint wetin fast.",
+]
+
+[[exhibition.work]]
+file = "third_mainland_inbound_640am_four_seconds.png"
+title = "Third Mainland, inbound, 6:40 am, four seconds"
+medium = "Enamel and spray on salvaged plywood, designed in code"
+story = '''
+Third Mainland Bridge is nearly twelve kilometres long. At twenty to seven in the morning the sun comes up over the lagoon beside you, and you cannot look at it, because you are riding.
+
+This is four seconds. The road ahead, left mirror, right mirror, one glance down at the tank. People think a mirror is the past. It is not. It is behind you, and it is now.
+'''
+
+[[exhibition.work]]
+file = "ojuelegba_642pm_eleven_seconds.png"
+title = "Ojuelegba, 6:42 pm, eleven seconds"
+medium = "Enamel and spray on salvaged plywood, designed in code"
+hero = true
+story = '''
+Ojuelegba is where three roads and a flyover meet. It is where I went down in 2022. I have painted it eleven times. This one is eleven seconds, at dusk, with the buses loading.
+
+Look for the yellow with two black stripes. Then look for the one piece I left as bare plywood. There is one in every version. People ask me why. That one I do not answer.
+'''
+
+[[exhibition.work]]
+file = "oshodi_under_bridge_rain_coming_nine_seconds.png"
+title = "Oshodi under bridge, rain coming, nine seconds"
+medium = "Enamel and spray on salvaged plywood, designed in code"
+story = '''
+Under the flyover at Oshodi, in the white light that comes just before rain. Everyone in Lagos knows that light. It means you have a few minutes to get where you are going.
+
+Seven looks, in nine seconds. One bus is in the picture twice, at two distances, because I looked at it twice and it had moved.
+'''
+
+# ----------------------------------------------------------------- 3, right
+[[exhibition]]
+slug = "ilanji"
+folder = "ilanji"
+artist = "Ilanji"
+title = "The Hour Before the Subject"
+origin = "North Malabar, born 1954"
+wall = "#2A201B"
+frame = "#120D0A"
+intro = '''
+Ilanji is seventy-two, and his given name has never been published. He painted cinema hoardings as a boy, kept the radio on cargo ships for eleven years, and painted in oil until his hand began to shake. Now he writes the brush down, stroke by stroke, and lets it paint.
+
+He decides the hour before he decides the subject. A grove at lamp-lighting. A river at noon. Snow at three in the afternoon. In nearly every picture there is one small flame, a lamp or a lit window, and the whole painting is built outward from it. I have hung the room dark, so that you can find them.
+'''
+bio = '''
+He was born in a house with an old ilanji tree in the sacred grove behind it, and took the tree's name when he began to sign. His grandmother lit a lamp at the serpent stones every dusk. At sea he filled sketchbooks in Kobe, Mombasa, Valparaíso and Reykjavik.
+
+In 2018 a flood reached the warehouse where about a hundred and forty of his canvases were stored. Nineteen survived. He was not surprised. As a boy he had watched ritual pictures drawn on the floor in coloured powder and wiped away when the rite ended. He gave up oil that year. Each picture now is a place built in three dimensions, lit, and then painted by a brush he has described in every particular. He has never painted the grove behind his own house. Asked why, he said it has not finished looking at him.
+'''
+said = [
+  "Light arrives. Leaves interrupt it. That is all I have ever painted.",
+  "My hand shakes. My instructions do not.",
+  "The program is the chant. The picture is what is left on the floor.",
+  "I cannot tell you whether the gods are there. The places are.",
+]
+
+[[exhibition.work]]
+file = "kavu_610pm_first_rain.png"
+title = "Kavu, 6:10 pm, first rain"
+medium = "Program, read as oil on coarse canvas"
+story = '''
+A kavu is a sacred grove: a piece of forest that a family leaves uncut, for the serpent gods, behind the house. This one is at ten past six, lamp-lighting hour, on the evening the monsoon arrives.
+
+These groves are being cut within my lifetime. I paint them so that somebody has looked properly. Find the lamp. My grandmother lit one like it every dusk. Then notice how far its light reaches, and where the rain begins.
+'''
+
+[[exhibition.work]]
+file = "nila_thirunavaya_noon_cloth_drying.png"
+title = "The Nila at Thirunavaya, noon, cloth drying"
+medium = "Program, read as oil on coarse canvas"
+story = '''
+The river of my childhood summers, as it was in the nineteen sixties. Washed cotton with gold borders is drying on the sandbank, in rows, at noon.
+
+Everything I know about white I learned here, from wet cloth in hard sun. Come close and you will find there is almost no white paint in it. It is grey, and blue, and yellow. Your eye does the rest.
+'''
+
+[[exhibition.work]]
+file = "kumano_fourth_bend_komorebi.png"
+title = "Kumano, the fourth bend, komorebi"
+medium = "Program, read as oil on coarse canvas"
+story = '''
+A pilgrim path in the cedar forests of Kumano, in Japan. I was a young man off a ship. I learned a word there, komorebi. It means sunlight that has come down through leaves.
+
+A woman in white is walking away from us, up the path. She is in roughly one of my pictures in seven. In Kerala, in Japan, in snow. You will want to ask who she is. Please do not.
+'''
+
+[[exhibition.work]]
+file = "kotka_3pm_december.png"
+title = "Kotka, 3 pm in December"
+medium = "Program, read as oil on coarse canvas"
+story = '''
+In the winter of 1979 my ship went into a repair yard at Kotka, in Finland. I was twenty-five and had never seen snow. This is three in the afternoon, which in December is the end of the day.
+
+One window is lit, and a single line of footprints leads to it. A shipwright there told me that an old Finnish word once meant a sacred grove. I understood that my grandmother's grove had relatives.
+'''
+
+[[exhibition.work]]
+file = "thrikkarthika_the_temple_tank_every_step_a_lamp.png"
+title = "Thrikkarthika, the temple tank, every step a lamp"
+medium = "Program, read as oil on coarse canvas"
+hero = true
+story = '''
+I allow myself one flame in a picture. This is the one evening of the year when I cannot keep to it. On Thrikkarthika, in November, every house and every temple in Kerala sets out small clay lamps at dusk.
+
+This is a temple tank, with a lamp on every step, on all four sides, and each one doubled in the water. I did not count them. I lit them the way the village does: one from another, until it was done. Stand back first. Then come close, and see that each flame is a single touch of the brush.
+'''
+
+[[exhibition.work]]
+file = "bumthang_a_weaver_one_butter_lamp.png"
+title = "Bumthang, a weaver, one butter lamp"
+medium = "Program, read as oil on coarse canvas"
+story = '''
+A room in Bumthang, in Bhutan, at night. A woman is weaving, and everything in the room is lit by one butter lamp. It is my only interior.
+
+Follow the light outward from the flame: her hands, the threads, the wall, and then nothing. In 1989 I sent my family a postcard from Bumthang. I wrote no message on it. I drew a lamp.
+'''
+
+[[exhibition.work]]
+file = "above_kibber_before_the_sun.png"
+title = "Above Kibber, before the sun reaches the pass"
+medium = "Program, read as oil on coarse canvas"
+story = '''
+Kibber is a village in the high Himalaya, above four thousand metres. The sun has reached the summits and has not yet reached the houses. For a few minutes the mountains are lit and the people are in shadow.
+
+One window is awake. Of my years in these mountains I will say only that it was cold, and that the tea was salted.
+'''
+
+[[exhibition.work]]
+file = "kavu_year_unknown_machines_quiet.png"
+title = "Kavu, year unknown, the machines have gone quiet"
+medium = "Program, read as oil on coarse canvas"
+story = '''
+The same kind of grove as the first picture in this room, in a year I cannot give you. Whatever was built around it has stopped.
+
+It is my question about what comes after us. They will be cleverer than we are. Will they leave a grove alone? Leela has hung it last. The lamp is still lit.
+'''

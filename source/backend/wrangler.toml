@@ -1,0 +1,9 @@
+name = "antara-guestbook"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "antara"
+database_id = "bbda7ae4-ac6a-47a8-87aa-92e58d7c8f52"
