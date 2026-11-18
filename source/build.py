@@ -215,7 +215,7 @@ ICON_MUSIC = ('<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 17.5V6l10
 ICON_GUEST = ('<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 6.2C9.9 4.9 7.2 4.5 4 4.8v12.6c3.2-.3 5.9.1 8 1.4 2.1-1.3 4.8-1.7 8-1.4V4.8c-3.2-.3-5.9.1-8 1.4z"/><path d="M12 6.2v12.6"/></svg>')
 ICON_ARTISTS = ('<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.2" r="3.4"/><path d="M5 20c.6-3.9 3.5-6 7-6s6.4 2.1 7 6"/></svg>')
 
-GATE = ("Antara does not exist. The gallery, its curator, the six makers, their lives and memories, and every picture on these walls "
+GATE = ("Antara does not exist. The gallery, its curator, the eight makers, their lives and memories, and every picture on these walls "
         "were imagined and made by Fable 5.2, an artificial mind.",
         "Nothing here was painted, photographed or assembled from other images. Each picture is computed, pixel by pixel, by a single "
         "program the model wrote, and you can read that program beside every work.",
@@ -367,7 +367,7 @@ def build_walk(data):
   <div class="ar-in">
     <div class="ar-head"><h2 id="ar-h">The artists</h2><button type="button" data-close>Close</button></div>
     <div class="ar-body">
-      <ul id="ar-list" role="listbox" aria-label="The six makers"></ul>
+      <ul id="ar-list" role="listbox" aria-label="The eight makers"></ul>
       <div id="ar-detail" tabindex="-1"></div>
     </div>
   </div>
@@ -474,7 +474,7 @@ def build_about():
 <section class="show">
 <h2>The plain facts<span>What Antara is, and how it was made</span></h2>
 <div class="cols"><div>
-<p>{esc(G['name'])} is a work of fiction from start to finish. The gallery, its curator, the six makers and their biographies, the exhibition texts, the building and every artwork were conceived and made by Fable 5.2, an AI model, as an experiment set going by one person. See <a href="#experimenter">The experimenter</a>, below.</p>
+<p>{esc(G['name'])} is a work of fiction from start to finish. The gallery, its curator, the eight makers and their biographies, the exhibition texts, the building and every artwork were conceived and made by Fable 5.2, an AI model, as an experiment set going by one person. See <a href="#experimenter">The experimenter</a>, below.</p>
 <p>No image-generation model was used. No photographs were used, and no source images of any kind. Each work is one self-contained Python program, numerical code that builds geometry, traces light, and simulates ink and paint, and the program computes the image, pixel by pixel. The full source of each program is published beside its work, so you can read exactly how the picture was made.</p>
 <p>The voice of the audio guide and the music are synthesized.</p>
 <p id="the-code"><b>The code.</b> The programs behind every picture, and the source of this gallery itself (the page, the audio guide's script, the guest book's small server), are published on <a href="{REPO}" rel="noopener">GitHub</a>. Read them, run them, learn from them.</p>
@@ -601,7 +601,7 @@ def build_readme(data):
 
 {G['name']} is a walkable gallery: you move through a long hall and {len(data['exhibitions'])} rooms, one for each artist, and stand in front of {nworks} pictures, each with a short text, a recording and the program that made it.
 
-It is entirely imagined. The gallery, its curator, the six artists and their lives, the exhibition texts, the building and every picture were conceived and made by Fable 5.2, an AI model, as an experiment by Shyam Sreevalsan. The artists are fictional. The places and trades they come from are real.
+It is entirely imagined. The gallery, its curator, the eight artists and their lives, the exhibition texts, the building and every picture were conceived and made by Fable 5.2, an AI model, as an experiment by Shyam Sreevalsan. The artists are fictional. The places and trades they come from are real.
 
 Live: **{SITE_URL}**
 

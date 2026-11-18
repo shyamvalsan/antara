@@ -1,0 +1,2111 @@
+"""
+Nan'an, 5:40 am, fog to the thirty-first floor
+
+Xiang Wan.
+
+Count.  The cab is level with the forty-first floor, 117 m up.  The fog came up from the river in the
+night and stands at about 90 m, which on the blocks built at river level is the thirty-first floor.
+It is 5:40 in the morning in March, forty minutes before the sun; the streets under the fog are still lit.
+
+On the left, close, one block of forty-five storeys.  On the right a rank of five, forty-six storeys,
+going away.  In the middle distance three blocks on the hill, thirty storeys on ground 58 m higher,
+so that the fog stands only to their twelfth floor.  Block 11, which was never finished, shows its
+last floors and its starter bars.  The crane beside it has one lamp at the end of the jib.  Beyond:
+the river, where there are no streets and the fog is dark; one bridge; the far bank; the hills.
+
+Usage:  python nanan_540am_fog_to_the_thirty_first_floor.py [scale=1.0] [out.png]
+        scale 1.0 is 4200 x 2800.
+
+Built in metres and lit by calculation:
+  the blocks  - signed-distance solids, every window a room of its own with its own lamp;
+                at this hour few are lit, mostly kitchens and the stairs
+  the fog     - a surveyed top and a density, marched along every ray; lit from above by the sky
+                and from below by a map of the streets, the blocks and the bridge, spread as fog spreads light
+  the sky     - by direction, with the first of the dawn low on the right
+  the crane   - lattice mast and jib as solids; the lamp lights the steel near it
+"""
+import sys, math, time, warnings
+import numpy as np
+from numba import njit, prange
+from numba.core.errors import NumbaWarning
+warnings.simplefilter('ignore', NumbaWarning)
+from PIL import Image, ImageDraw, ImageFont
+from scipy.ndimage import gaussian_filter
+
+SEED = 19880312
+PW, PH = 4200, 2800
+FOC = 3250.0                    # pixels per unit tangent at scale 1
+CXP, CYP = 2100.0, 1120.0       # where the level line of sight meets the picture
+
+FH = 2.90                       # storey
+MODW = 21.2                     # one module of plan
+CAM_F = 41
+CAMX, CAMY, CAMZ = 0.0, (CAM_F - 0.5) * FH, 0.0
+FOGTOP, FOGMAX, FOGMIN = 31 * FH, 110.0, 70.0
+FOGDEN, FOGSOFT = 0.060, 2.2
+HAZE = 0.00009
+FSKY = (0.019, 0.030, 0.060)    # what the sky puts into the top of the fog
+GLOWK = 0.62                    # what the streets put into the bottom of it
+GLOWX, GLOWZ = 0.5, -0.866      # where the sun will come up
+MX0, MX1, MZ0, MZ1, MCELL = -2600.0, 2600.0, -5200.0, 200.0, 2.5
+
+# block 11, never finished (as in the picture of it)
+FH3 = 3.00
+NS = 33
+FW, FD = 63.6, 14.0
+HT = NS * FH3
+LIT_F, LIT_BAY = 13, 4
+BLX, BLY, BLE = 2.05, 2.36, 3.30
+BULB_I = 14.0
+MASTX, MASTH = 41.1, 84.0
+FYAW = 0.10
+FCX, FCZ, FCY, FSY, FBASE = -30.0, -285.0, math.cos(FYAW), math.sin(FYAW), 12.0
+
+# the crane beside it
+CRX, CRZ, CRYAW = 8.0, -268.0, math.radians(-160.0)
+CRC, CRS = math.cos(CRYAW), math.sin(CRYAW)
+CRH, CRB, JIBL, CJIB, TROL, HOOKY = 128.0, 0.0, 55.0, 14.0, 24.0, 96.0
+
+TELL_F, TELL_BAY = 13, 4        # this one is lit
+LANTERN_F, LANTERN_BAY = -9, -9
+SKY_E = (0.020, 0.031, 0.062)   # what the sky gives a wall, before dawn
+P_HOME = 0.88
+EXPOSURE = 7.0
+
+
+def blocks():
+    """every block in sight: x, z, turn, length, depth, storeys, seed, height of its ground."""
+    b = [[-70.0, -108.0, 0.12, 42.4, 15.0, 45, 201, 0.0],
+         [-143.0, -450.0, 0.25, 63.6, 15.0, 30, SEED % 100000, 58.0],
+         [-235.0, -560.0, 0.25, 63.6, 15.0, 30, 203, 62.0],
+         [-300.0, -690.0, 0.25, 63.6, 15.0, 30, 204, 66.0],
+         [85.0, -190.0, -0.35, 42.4, 15.0, 46, 211, 0.0],
+         [100.0, -300.0, -0.35, 42.4, 15.0, 46, 212, 0.0],
+         [115.0, -420.0, -0.35, 42.4, 15.0, 46, 213, 0.0],
+         [130.0, -550.0, -0.35, 42.4, 15.0, 46, 214, 0.0],
+         [145.0, -690.0, -0.35, 42.4, 15.0, 46, 215, 0.0]]
+    rng = np.random.default_rng(SEED + 5)
+    n = 300
+    for c in range(150):                                  # the estates farther off, each a rank or two
+        z0 = -430.0 - 4300.0 * rng.random() ** 1.5
+        x0 = (rng.random() - 0.5) * 1.7 * (-z0)
+        yaw = (rng.random() - 0.5) * 1.6
+        nf = 37 + int(rng.random() * 18); base = 45.0 * rng.random() ** 2
+        wd = 42.4 if rng.random() < 0.65 else 63.6
+        ax, az = math.cos(yaw + 0.9), -math.sin(yaw + 0.9)
+        px, pz = -az, ax
+        rows = 1 + int(rng.random() * 2.2)
+        for r in range(rows):
+            for i in range(3 + int(rng.random() * 5)):
+                x = x0 + ax * i * (wd + 50.0) + px * r * 95.0; z = z0 + az * i * (wd + 50.0) + pz * r * 95.0
+                cz = -1250.0 + 330.0 * math.sin(x / 620.0 + 0.6) + 0.10 * x
+                if abs(z - cz) < 250.0 or z > -400.0 or z < MZ0 + 150.0:
+                    continue
+                if -z < 900.0 and abs(x / z) < 0.60 and not (-z > 680.0 and x / -z > 0.02 and x / -z < 0.20):
+                    continue                              # keep clear what stands in front
+                if min((x - q[0]) ** 2 + (z - q[1]) ** 2 for q in b) < 85.0 ** 2:
+                    continue
+                b.append([x, z, yaw, wd, 15.0, nf + int(rng.random() * 3), n, base]); n += 1
+    return np.array(b)
+
+
+BT = blocks()
+BTC, BTS = np.cos(BT[:, 2]), np.sin(BT[:, 2])
+_r = 0.5 * np.hypot(BT[:, 3], BT[:, 4]) + 2.0            # each block's span across the view, to pass over the rest quickly
+BTA = np.stack([(BT[:, 0] - _r) / np.maximum(-BT[:, 1] - _r, 1.0), (BT[:, 0] + _r) / np.maximum(-BT[:, 1] - _r, 1.0)], 1)
+BTA = np.stack([np.minimum(BTA[:, 0], (BT[:, 0] - _r) / (-BT[:, 1] + _r)), np.maximum(BTA[:, 1], (BT[:, 0] + _r) / (-BT[:, 1] + _r))], 1)
+
+NJ = dict(cache=True, fastmath=True, error_model='numpy')
+
+K_, B_, L_, C_, W_ = 0, 1, 2, 3, 4
+M_WALL, M_CONC, M_METAL, M_CLOTH, M_PLANT, M_AC, M_PIPE, M_WHITE, M_POT, M_CRATE, M_GAS, M_LANT, M_ROOF = 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13
+M_BLOCK, M_PLY, M_REBAR, M_MAST, M_TARP, M_JUG, M_HAIR, M_BULB, M_CAB, M_RED, M_NET = 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
+
+
+# ------------------------------------------------------------------ small tools
+@njit(**NJ)
+def hi(a, b, c, d):
+    h = (a * 374761393 + b * 668265263 + c * 1274126177 + d * 2246822519) & 0xFFFFFFFF
+    h = ((h ^ (h >> 15)) * 2246822519) & 0xFFFFFFFF
+    h = ((h ^ (h >> 13)) * 3266489917) & 0xFFFFFFFF
+    return h ^ (h >> 16)
+
+
+@njit(**NJ)
+def hf(a, b, c, d):
+    return (hi(a, b, c, d) & 0xFFFFFF) / 16777216.0
+
+
+@njit(**NJ)
+def lcg(s):
+    s = (s * 1664525 + 1013904223) & 0xffffffff
+    return s, ((s >> 8) & 0xffffff) / 16777216.0
+
+
+@njit(**NJ)
+def noise2(x, y):
+    xi = math.floor(x); yi = math.floor(y)
+    fx = x - xi; fy = y - yi
+    fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy)
+    i = int(xi); j = int(yi)
+    a = hf(i, j, 7, 1); b = hf(i + 1, j, 7, 1); c = hf(i, j + 1, 7, 1); d = hf(i + 1, j + 1, 7, 1)
+    return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy
+
+
+@njit(**NJ)
+def fbm2(x, y, o):
+    s = 0.0; a = 0.5
+    for _ in range(o):
+        s += a * noise2(x, y); x = x * 2.03 + 11.3; y = y * 2.03 + 5.7; a *= 0.5
+    return s
+
+
+@njit(**NJ)
+def sstep(a, b, x):
+    t = (x - a) / (b - a)
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    return t * t * (3 - 2 * t)
+
+
+@njit(**NJ)
+def sd_box(x, y, z, bx, by, bz):
+    qx = abs(x) - bx; qy = abs(y) - by; qz = abs(z) - bz
+    ox = max(qx, 0.0); oy = max(qy, 0.0); oz = max(qz, 0.0)
+    return math.sqrt(ox * ox + oy * oy + oz * oz) + min(max(qx, max(qy, qz)), 0.0)
+
+
+@njit(**NJ)
+def bx(x, y, z, x0, x1, y0, y1, z0, z1):
+    return sd_box(x - 0.5 * (x0 + x1), y - 0.5 * (y0 + y1), z - 0.5 * (z0 + z1), 0.5 * (x1 - x0), 0.5 * (y1 - y0), 0.5 * (z1 - z0))
+
+
+@njit(**NJ)
+def sd_box2(a, b, ha, hb):
+    qa = abs(a) - ha; qb = abs(b) - hb
+    oa = max(qa, 0.0); ob = max(qb, 0.0)
+    return math.sqrt(oa * oa + ob * ob) + min(max(qa, qb), 0.0)
+
+
+# ------------------------------------------------------------------ the plan of a face
+@njit(**NJ)
+def bay_of(u, Wf):
+    """which bay of the face: id, kind, left edge, width, mirrored, flat."""
+    nm = int(Wf / MODW + 1e-6)
+    if nm >= 1:
+        off = 0.5 * (Wf - nm * MODW)
+        x = u - off
+        if x < 0.0:
+            return -1, W_, 0.0, max(off, 1e-3), 0, -1
+        if x >= nm * MODW:
+            return -2, W_, off + nm * MODW, max(off, 1e-3), 0, -1
+        m = int(x / MODW); xm = x - m * MODW; b0 = off + m * MODW
+        if xm < 2.1:
+            return m * 7 + 0, K_, b0, 2.1, 0, m * 3
+        if xm < 5.4:
+            return m * 7 + 1, B_, b0 + 2.1, 3.3, 0, m * 3
+        if xm < 9.3:
+            return m * 7 + 2, L_, b0 + 5.4, 3.9, 0, m * 3
+        if xm < 13.2:
+            return m * 7 + 3, L_, b0 + 9.3, 3.9, 1, m * 3 + 1
+        if xm < 16.5:
+            return m * 7 + 4, B_, b0 + 13.2, 3.3, 1, m * 3 + 1
+        if xm < 18.6:
+            return m * 7 + 5, K_, b0 + 16.5, 2.1, 1, m * 3 + 1
+        return m * 7 + 6, C_, b0 + 18.6, 2.6, 0, m * 3 + 2
+    c = 0.5 * Wf
+    if abs(u - c) < 1.05:
+        return 0, K_, c - 1.05, 2.1, 0, 0
+    if u < c:
+        return -1, W_, 0.0, c - 1.05, 0, -1
+    return -2, W_, c + 1.05, Wf - c - 1.05, 0, -1
+
+
+@njit(**NJ)
+def opening(typ):
+    """the glazed opening of a bay: x0, x1, y0, y1, plane."""
+    if typ == K_:
+        return 0.55, 1.65, 0.95, 2.20, -0.08
+    if typ == B_:
+        return 0.20, 2.40, 0.50, 2.20, -0.10
+    if typ == L_:
+        return 0.40, 3.50, 0.02, 2.40, -1.40
+    return 0.60, 2.00, 0.80, 2.20, -0.25
+
+
+@njit(**NJ)
+def roomdim(typ):
+    if typ == K_:
+        return 0.12, 2.00, 3.0
+    if typ == B_:
+        return 0.10, 3.20, 3.8
+    if typ == L_:
+        return 0.10, 3.80, 5.0
+    return 0.20, 2.40, 2.6
+
+
+LAMPS = np.array([[1.00, 0.60, 0.27], [1.00, 0.70, 0.40], [1.00, 0.84, 0.64], [0.88, 0.94, 1.00], [0.80, 1.00, 0.88], [0.93, 0.97, 0.92]])
+
+
+@njit(**NJ)
+def flat_state(seed, fl, f):
+    """a household: is anyone home, and which lamps they bought."""
+    fs = hi(seed, fl, f, 11)
+    home = hf(fs, 1, 0, 0) < P_HOME
+    r = hf(fs, 2, 0, 0)
+    li = 0 if r < 0.16 else (1 if r < 0.34 else (2 if r < 0.56 else (3 if r < 0.82 else (4 if r < 0.92 else 5))))
+    return fs, home, li
+
+
+@njit(**NJ)
+def room_state(seed, typ, bid, fl, f, tell):
+    """lamp on or off, its strength and colour, curtains (kind, left, right, colour), a second small light."""
+    fs, home, li = flat_state(seed, fl, f)
+    cs = hi(seed, bid, f, 23)
+    p = 0.08 if typ == L_ else (0.10 if typ == B_ else (0.22 if typ == K_ else 0.36))   # twenty to six: few are up
+    on = (home or typ == C_) and hf(cs, 3, 0, 0) < p
+    bath = typ == K_ and hf(fs, 9, 0, 0) < 0.34
+    if typ == K_ and not bath and li < 2 and hf(cs, 4, 0, 0) < 0.7:
+        li = 3 + int(hf(cs, 5, 0, 0) * 2.99)
+    if typ == C_:
+        li = 3 if hf(seed, bid, 3, 3) < 0.6 else 5
+    I = 2.0 + 2.8 * hf(cs, 6, 0, 0) ** 1.5
+    if typ == K_:
+        I *= 0.55
+    if typ == C_:
+        I *= 0.20
+    # curtains
+    r = hf(cs, 7, 0, 0)
+    ck = 0; cl = 0.0; cr = 0.0
+    if typ == B_:
+        if r < 0.18:
+            ck = 0
+        elif r < 0.66:
+            ck = 1; cl = 0.06 + 0.5 * hf(cs, 8, 0, 0); cr = 0.06 + 0.5 * hf(cs, 9, 0, 0)
+            if hf(cs, 10, 0, 0) < 0.36:
+                cl = 0.55; cr = 0.55
+        elif r < 0.90:
+            ck = 2; cl = 0.05 + 0.22 * hf(cs, 8, 0, 0); cr = 0.05 + 0.22 * hf(cs, 9, 0, 0)
+        else:
+            ck = 3; cl = 0.2 + 0.7 * hf(cs, 8, 0, 0)
+    elif typ == L_:
+        if r < 0.36:
+            ck = 0
+        elif r < 0.74:
+            ck = 1; cl = 0.05 + 0.34 * hf(cs, 8, 0, 0); cr = 0.05 + 0.34 * hf(cs, 9, 0, 0)
+            if hf(cs, 10, 0, 0) < 0.14:
+                cl = 0.55; cr = 0.55
+        else:
+            ck = 2; cl = 0.04 + 0.2 * hf(cs, 8, 0, 0); cr = 0.04 + 0.2 * hf(cs, 9, 0, 0)
+    elif typ == K_ and not bath:
+        if r < 0.12:
+            ck = 3; cl = 0.15 + 0.4 * hf(cs, 8, 0, 0)
+    ci = int(hf(cs, 12, 0, 0) * 8.99)
+    aux = 0                                              # 1 television, 2 desk lamp, 3 the hall door open and lit
+    r = hf(cs, 13, 0, 0)
+    if typ == L_ and home and r < 0.025:
+        aux = 1
+    elif typ == B_ and home and r < 0.03:
+        aux = 2
+    elif typ == B_ and home and r < 0.045:
+        aux = 1
+    elif (typ == B_ or typ == L_) and home and (not on) and r < 0.10:
+        aux = 3
+    if tell:
+        on = True; I = 3.6; li = 1; ck = 0; cl = 0.0; cr = 0.0; aux = 0; bath = False
+    return cs, fs, on, I, li, ck, cl, cr, ci, aux, bath, home
+
+
+CURT = np.array([[0.62, 0.52, 0.38], [0.74, 0.70, 0.60], [0.36, 0.44, 0.56], [0.62, 0.42, 0.44], [0.40, 0.44, 0.28],
+                 [0.40, 0.28, 0.20], [0.70, 0.62, 0.36], [0.50, 0.44, 0.60], [0.24, 0.44, 0.46]])
+CLOTH = np.array([[0.78, 0.78, 0.76], [0.50, 0.52, 0.55], [0.12, 0.16, 0.30], [0.42, 0.56, 0.72], [0.72, 0.50, 0.54],
+                  [0.52, 0.46, 0.30], [0.06, 0.06, 0.07], [0.70, 0.58, 0.22], [0.24, 0.42, 0.32], [0.80, 0.74, 0.62],
+                  [0.30, 0.34, 0.50], [0.56, 0.60, 0.44]])
+SOFA = np.array([[0.36, 0.34, 0.32], [0.30, 0.20, 0.13], [0.58, 0.50, 0.38], [0.16, 0.34, 0.36], [0.56, 0.42, 0.14],
+                 [0.14, 0.18, 0.32], [0.46, 0.44, 0.48], [0.34, 0.40, 0.26]])
+WALLS = np.array([[0.80, 0.79, 0.76], [0.82, 0.78, 0.66], [0.66, 0.76, 0.66], [0.66, 0.74, 0.82], [0.82, 0.70, 0.68],
+                  [0.84, 0.80, 0.56], [0.78, 0.78, 0.78], [0.74, 0.70, 0.62]])
+TVC = np.array([[0.40, 0.62, 1.00], [0.55, 0.85, 1.00], [0.85, 0.75, 1.00], [0.60, 1.00, 0.90], [1.00, 0.90, 0.75]])
+
+
+# ------------------------------------------------------------------ the face as solids
+@njit(**NJ)
+def face_sdf(u, v, w, Wf, nf, seed):
+    """distance to the wall of this face and to what is fixed on it, and what the nearer of those is.
+    u along the face, v up, w out of it.  Returns (wall, added, material of added)."""
+    if w > 1.0:
+        return w - 0.6, 1e9, 0
+    if v < 0.0 or v >= nf * FH or w < -1.7 or u < 0.0 or u > Wf:
+        return w, 1e9, 0
+    f = int(v / FH); yl = v - f * FH
+    bid, typ, x0, bw, mir, fl = bay_of(u, Wf)
+    xl = u - x0
+    if mir == 1:
+        xl = bw - xl
+    border = min(min(xl, bw - xl), min(yl, FH - yl)) + 0.02
+    dw = min(w, sd_box2(min(yl, FH - yl), w, 0.07, 0.035))
+    da = 1e9; ma = 0
+    if typ == W_:
+        return dw, border, 0
+    cs = hi(seed, bid, f, 23)
+    fs = hi(seed, fl, f, 11)
+    if typ == K_:
+        dw = max(dw, -bx(xl, yl, w, 0.55, 1.65, 0.95, 2.20, -0.08, 9.0))
+        d = bx(xl, yl, w, 0.48, 1.72, 0.88, 0.95, -0.05, 0.10)                 # sill
+        if d < da: da = d; ma = M_CONC
+        d = math.sqrt((xl - 0.20) ** 2 + (w - 0.09) ** 2) - 0.055              # the drain
+        if d < da: da = d; ma = M_PIPE
+        d = bx(xl, yl, w, 0.12, 0.28, 1.40, 1.46, 0.0, 0.16)
+        if d < da: da = d; ma = M_METAL
+        d = math.sqrt((xl - 0.38) ** 2 + (w - 0.05) ** 2) - 0.022              # gas
+        if d < da: da = d; ma = M_GAS
+        if hf(fs, 9, 0, 0) >= 0.34:                                            # a kitchen: the vent
+            qy = yl - 2.48; qx = xl - 1.88
+            d = max(math.sqrt(qx * qx + qy * qy) - 0.075, abs(w - 0.06) - 0.08)
+            if d < da: da = d; ma = M_METAL
+    elif typ == B_:
+        dw = max(dw, -bx(xl, yl, w, 0.20, 2.40, 0.50, 2.20, -0.10, 9.0))
+        d = bx(xl, yl, w, 0.08, 2.52, 2.20, 2.31, 0.0, 0.46)                   # hood
+        if d < da: da = d; ma = M_CONC
+        d = bx(xl, yl, w, 0.08, 2.52, 0.39, 0.50, 0.0, 0.46)                   # sill
+        if d < da: da = d; ma = M_CONC
+        d = bx(xl, yl, w, 2.52, 3.24, 0.30, 0.38, 0.0, 0.52)                   # ledge for the unit
+        if d < da: da = d; ma = M_CONC
+        if hf(fs, 20, 0, 0) < 0.86:
+            d = bx(xl, yl, w, 2.56, 3.20, 0.38, 0.92, 0.13, 0.43) - 0.01
+            if d < da: da = d; ma = M_AC
+            d = math.sqrt((xl - 2.47) ** 2 + (w - 0.03) ** 2) - 0.02           # its pipe, up to the hole
+            d = max(d, abs(yl - 1.25) - 0.75)
+            if d < da: da = d; ma = M_WHITE
+        # guard rails on the ledge
+        qy = (yl - 0.42) - 0.2 * max(0.0, min(3.0, math.floor((yl - 0.42) / 0.2 + 0.5)))
+        d = max(math.sqrt(qy * qy + (w - 0.52) ** 2) - 0.012, abs(xl - 2.88) - 0.38)
+        if d < da: da = d; ma = M_METAL
+        d = max(math.sqrt((abs(xl - 2.88) - 0.37) ** 2 + (w - 0.52) ** 2) - 0.014, abs(yl - 0.70) - 0.34)
+        if d < da: da = d; ma = M_METAL
+        r = hf(cs, 30, 0, 0)
+        if r < 0.10:                                                           # a cage
+            if w > -0.02 and w < 0.60 and xl > 0.0 and xl < 2.6:
+                qx = xl - 0.12 - 0.115 * max(0.0, min(20.0, math.floor((xl - 0.12) / 0.115 + 0.5)))
+                d = max(math.sqrt(qx * qx + (w - 0.50) ** 2) - 0.009, abs(yl - 1.35) - 0.86)
+                if d < da: da = d; ma = M_METAL
+                qy = yl - 0.60 - 0.5 * max(0.0, min(3.0, math.floor((yl - 0.60) / 0.5 + 0.5)))
+                d = max(math.sqrt(qy * qy + (w - 0.50) ** 2) - 0.011, abs(xl - 1.30) - 1.18)
+                if d < da: da = d; ma = M_METAL
+                d = max(math.sqrt(qy * qy + (abs(xl - 1.30) - 1.17) ** 2) - 0.011, abs(w - 0.25) - 0.25)
+                if d < da: da = d; ma = M_METAL
+        if r < 0.30:                                                           # a pole out of the window, and washing
+            d = max(math.sqrt((yl - 2.12) ** 2 + (w - 0.36) ** 2) - 0.012, abs(xl - 1.30) - 1.15)
+            if d < da: da = d; ma = M_METAL
+            n = 2 + int(hf(cs, 31, 0, 0) * 3.99)
+            for i in range(n):
+                gx = 0.40 + 1.8 * (i + 0.2 + 0.6 * hf(cs, 32, i, 0)) / n
+                gh = 0.45 + 0.45 * hf(cs, 33, i, 0); gw = 0.16 + 0.14 * hf(cs, 34, i, 0)
+                d = bx(xl, yl, w, gx - gw, gx + gw, 2.10 - gh, 2.10, 0.345, 0.375)
+                if d < da: da = d; ma = M_CLOTH + 100 * (1 + int(hf(cs, 35, i, 0) * 11.99))
+        elif r > 0.80:                                                         # pots on the sill
+            n = 1 + int(hf(cs, 31, 0, 0) * 2.99)
+            for i in range(n):
+                px = 0.4 + 1.8 * hf(cs, 32, i, 0); pr = 0.09 + 0.07 * hf(cs, 33, i, 0)
+                d = bx(xl, yl, w, px - 0.07, px + 0.07, 0.50, 0.62, 0.22, 0.36)
+                if d < da: da = d; ma = M_POT
+                d = math.sqrt((xl - px) ** 2 + (yl - 0.65 - pr) ** 2 * 0.6 + (w - 0.29) ** 2) - pr * (0.80 + 0.28 * math.sin(xl * 43.0 + i) * math.sin(yl * 47.0))
+                if d < da: da = d; ma = M_PLANT
+    elif typ == L_:
+        dw = max(dw, -bx(xl, yl, w, 0.10, 3.80, 0.0, 2.78, -1.40, 9.0))
+        pk = hf(fs, 40, 0, 0)
+        if pk < 0.72:                                                          # a solid parapet (or one glazed over)
+            d = bx(xl, yl, w, 0.10, 3.80, 0.0, 1.05, -0.12, 0.0)
+            if d < da: da = d; ma = M_WALL
+            d = bx(xl, yl, w, 0.08, 3.82, 1.05, 1.10, -0.15, 0.03)
+            if d < da: da = d; ma = M_CONC
+            if pk < 0.32:                                                      # glazed over: the frames
+                qx = xl - 0.10 - 0.925 * max(0.0, min(4.0, math.floor((xl - 0.10) / 0.925 + 0.5)))
+                d = max(max(abs(qx) - 0.025, abs(w + 0.06) - 0.03), abs(yl - 1.94) - 0.84)
+                if d < da: da = d; ma = M_WHITE
+                d = bx(xl, yl, w, 0.10, 3.80, 2.30, 2.35, -0.09, -0.03)
+                if d < da: da = d; ma = M_WHITE
+        else:                                                                  # bars
+            d = bx(xl, yl, w, 0.10, 3.80, 0.0, 0.14, -0.12, 0.0)
+            if d < da: da = d; ma = M_CONC
+            d = bx(xl, yl, w, 0.10, 3.80, 1.04, 1.09, -0.09, -0.03)
+            if d < da: da = d; ma = M_METAL
+            qx = xl - 0.16 - 0.112 * max(0.0, min(32.0, math.floor((xl - 0.16) / 0.112 + 0.5)))
+            d = max(math.sqrt(qx * qx + (w + 0.06) ** 2) - 0.010, abs(yl - 0.59) - 0.46)
+            if d < da: da = d; ma = M_METAL
+        if w < 0.05:
+            # drying rails under the soffit, and what hangs
+            n = int(hf(cs, 41, 0, 0) * 7.6) - 1
+            if n > 0 or hf(cs, 42, 0, 0) < 0.6:
+                d = max(math.sqrt((yl - 2.52) ** 2 + (abs(w + 0.55) - 0.14) ** 2) - 0.011, abs(xl - 1.95) - 1.55)
+                if d < da: da = d; ma = M_METAL
+            for i in range(n):
+                gx = 0.55 + 2.8 * (i + 0.15 + 0.7 * hf(cs, 43, i, 0)) / n
+                kind = hf(cs, 44, i, 0)
+                gz = -0.41 if hf(cs, 45, i, 0) < 0.5 else -0.69
+                ci = 100 * (1 + int(hf(cs, 46, i, 0) * 11.99))
+                if kind < 0.45:                                                # a shirt on a hanger
+                    gh = 0.55 + 0.2 * hf(cs, 47, i, 0)
+                    d = bx(xl, yl, w, gx - 0.21, gx + 0.21, 2.40 - gh + 0.03 * math.sin(xl * 27.0 + i), 2.40, gz - 0.02, gz + 0.02)
+                    d = min(d, bx(xl, yl, w, gx - 0.33, gx + 0.33, 2.22, 2.40, gz - 0.02, gz + 0.02))
+                    d = min(d, bx(xl, yl, w, gx - 0.012, gx + 0.012, 2.40, 2.52, gz - 0.01, gz + 0.01))
+                elif kind < 0.75:                                              # trousers
+                    gh = 0.80 + 0.2 * hf(cs, 47, i, 0)
+                    d = bx(abs(xl - gx), yl, w, 0.02, 0.15, 2.46 - gh, 2.46, gz - 0.018, gz + 0.018)
+                    d = min(d, bx(xl, yl, w, gx - 0.15, gx + 0.15, 2.20, 2.50, gz - 0.02, gz + 0.02))
+                else:                                                          # a towel or a sheet
+                    gh = 0.6 + 0.7 * hf(cs, 47, i, 0); gw = 0.2 + 0.25 * hf(cs, 48, i, 0)
+                    d = bx(xl, yl, w, gx - gw, gx + gw, 2.50 - gh + 0.04 * math.sin(xl * 19.0 + 2.0 * i), 2.51, gz - 0.015, gz + 0.015)
+                if d < da: da = d; ma = M_CLOTH + ci
+            if hf(cs, 50, 0, 0) < 0.42:                                        # the washing machine
+                d = bx(xl, yl, w, 0.16, 0.76, 0.0, 0.86, -1.36, -0.80) - 0.01
+                if d < da: da = d; ma = M_WHITE
+            r = hf(cs, 51, 0, 0)
+            if r < 0.5:                                                        # things kept
+                hgt = 0.35 + 0.9 * hf(cs, 52, 0, 0)
+                d = bx(xl, yl, w, 3.15, 3.74, 0.0, hgt, -1.34, -0.78)
+                if d < da: da = d; ma = M_CRATE + 100 * int(hf(cs, 53, 0, 0) * 5.99)
+                if r < 0.25:
+                    d = bx(xl, yl, w, 2.70, 3.12, 0.0, 0.42, -1.30, -0.90)
+                    if d < da: da = d; ma = M_CRATE + 100 * int(hf(cs, 54, 0, 0) * 5.99)
+            n = int(hf(cs, 55, 0, 0) * 5.2) - 1                                # plants
+            for i in range(n):
+                px = 0.35 + 3.2 * hf(cs, 56, i, 0); pr = 0.12 + 0.13 * hf(cs, 57, i, 0)
+                py = 1.10 if (pk < 0.72 and pk >= 0.32 and hf(cs, 58, i, 0) < 0.6) else 0.0
+                pz = -0.06 if py > 0.5 else -0.30 - 0.3 * hf(cs, 59, i, 0)
+                ph = 0.14 if py > 0.5 else 0.22 + 0.5 * hf(cs, 60, i, 0) * hf(cs, 61, i, 0)
+                d = bx(xl, yl, w, px - 0.08, px + 0.08, py, py + ph, pz - 0.08, pz + 0.08)
+                if d < da: da = d; ma = M_POT
+                d = math.sqrt((xl - px) ** 2 + ((yl - py - ph - pr) * (0.55 + 0.5 * hf(cs, 62, i, 0))) ** 2 + (w - pz) ** 2) - pr * (0.80 + 0.28 * math.sin(xl * 37.0 + i) * math.sin(yl * 41.0 + 2.0 * i))
+                if d < da: da = d; ma = M_PLANT
+            if seed == SEED % 100000 and f == LANTERN_F - 1 and bid == LANTERN_BAY - 1:
+                d = math.sqrt((xl - 1.95) ** 2 + ((yl - 2.30) * 0.85) ** 2 + (w + 0.10) ** 2) - 0.17
+                if d < da: da = d; ma = M_LANT
+    else:                                                                      # the stair
+        dw = max(dw, -bx(xl, yl, w, 0.20, 2.40, -1.0, FH + 1.0, -0.25, 9.0))
+        d = bx(xl, yl, w, 0.52, 2.08, 0.72, 0.80, -0.25, -0.12)
+        if d < da: da = d; ma = M_CONC
+    return dw, min(da, border), ma
+
+
+# ------------------------------------------------------------------ the rooms
+@njit(**NJ)
+def env(dv, wob):
+    """what a pane returns: the sky before dawn, or the fog and its glow."""
+    e = dv + wob
+    if e > 0.0:
+        k = math.exp(-e * 6.0)
+        return 0.008 + 0.034 * k, 0.014 + 0.044 * k, 0.034 + 0.056 * k
+    k = 1.0 - math.exp(e * 6.0)
+    return 0.030 + 0.050 * k, 0.034 + 0.016 * k, 0.050 - 0.020 * k
+
+
+@njit(**NJ)
+def fbox(typ, cs, i, RW, RD, side, aux):
+    """the i-th piece of furniture of this room: ok, box, colour, emission."""
+    x0 = 0.0; x1 = 0.0; y0 = 0.0; y1 = 0.0; z0 = 0.0; z1 = 0.0
+    r = 0.3; g = 0.3; b = 0.3; em = 0.0; ok = False
+    if typ == L_:
+        if i == 0 or i == 1:
+            k = int(hf(cs, 70, 0, 0) * 7.99)
+            r = SOFA[k, 0]; g = SOFA[k, 1]; b = SOFA[k, 2]; ok = True
+            zs = 0.9 + 0.5 * hf(cs, 71, 0, 0)
+            if i == 0:
+                x0 = 0.05; x1 = 0.95; y0 = 0.0; y1 = 0.42; z0 = zs; z1 = zs + 2.0
+            else:
+                x0 = 0.05; x1 = 0.28; y0 = 0.0; y1 = 0.86; z0 = zs; z1 = zs + 2.0
+        elif i == 2:
+            ok = True; x0 = RW - 0.46; x1 = RW - 0.04; y0 = 0.0; y1 = 0.46; z0 = 1.1; z1 = 3.0
+            r = 0.32; g = 0.22; b = 0.14
+            if hf(cs, 72, 0, 0) < 0.4:
+                r = 0.7; g = 0.7; b = 0.68
+        elif i == 3:
+            ok = True; x0 = RW - 0.13; x1 = RW - 0.08; y0 = 0.62; y1 = 1.30; z0 = 1.5; z1 = 2.7
+            r = 0.02; g = 0.02; b = 0.025
+            if aux == 1:
+                em = 1.0
+        elif i == 4:
+            ok = hf(cs, 73, 0, 0) < 0.75
+            x0 = 1.40; x1 = 2.05; y0 = 0.0; y1 = 0.40; z0 = 1.5; z1 = 2.5; r = 0.30; g = 0.20; b = 0.12
+        elif i == 5 or i == 6:
+            tc = 1.1 + (RW - 2.2) * hf(cs, 74, 0, 0); ok = True
+            if i == 5:
+                x0 = tc - 0.62; x1 = tc + 0.62; y0 = 0.70; y1 = 0.75; z0 = 3.55; z1 = 4.35; r = 0.42; g = 0.30; b = 0.18
+                if hf(cs, 75, 0, 0) < 0.4:
+                    r = 0.72; g = 0.72; b = 0.70
+            else:
+                x0 = tc - 0.48; x1 = tc + 0.48; y0 = 0.0; y1 = 0.46; z0 = 3.30; z1 = 3.62; r = 0.25; g = 0.17; b = 0.10
+        elif i == 7:
+            ok = hf(cs, 76, 0, 0) < 0.62
+            a = 0.1 + (RW - 1.1) * hf(cs, 77, 0, 0)
+            x0 = a; x1 = a + 0.85; y0 = 0.0; y1 = 1.5 + 0.6 * hf(cs, 78, 0, 0); z0 = RD - 0.48; z1 = RD - 0.02
+            r = 0.36; g = 0.25; b = 0.15
+            if hf(cs, 79, 0, 0) < 0.45:
+                r = 0.74; g = 0.75; b = 0.76
+        elif i == 8:
+            ok = hf(cs, 80, 0, 0) < 0.6
+            x0 = 0.02; x1 = 0.24; y0 = 2.24; y1 = 2.52; z0 = 3.3; z1 = 4.2; r = 0.80; g = 0.80; b = 0.78
+    elif typ == B_:
+        if i == 0:
+            ok = True; k = int(hf(cs, 70, 0, 0) * 11.99)
+            x0 = 0.05; x1 = 1.55; y0 = 0.0; y1 = 0.52; z0 = 1.25; z1 = 3.35
+            r = 0.3 + 0.6 * CLOTH[k, 0]; g = 0.3 + 0.6 * CLOTH[k, 1]; b = 0.3 + 0.6 * CLOTH[k, 2]
+        elif i == 1:
+            ok = True; x0 = 0.05; x1 = 1.55; y0 = 0.0; y1 = 0.98; z0 = 3.35; z1 = 3.45; r = 0.34; g = 0.23; b = 0.14
+        elif i == 2:
+            ok = hf(cs, 71, 0, 0) < 0.85
+            x0 = RW - 0.62; x1 = RW - 0.02; y0 = 0.0; y1 = 2.10; z0 = 2.0; z1 = RD - 0.02; r = 0.44; g = 0.32; b = 0.20
+            if hf(cs, 72, 0, 0) < 0.4:
+                r = 0.76; g = 0.75; b = 0.72
+        elif i == 3:
+            ok = hf(cs, 73, 0, 0) < 0.6
+            x0 = RW - 1.25; x1 = RW - 0.05; y0 = 0.70; y1 = 0.74; z0 = 0.28; z1 = 0.88; r = 0.50; g = 0.38; b = 0.24
+        elif i == 4:
+            ok = aux == 2
+            x0 = RW - 0.52; x1 = RW - 0.36; y0 = 1.02; y1 = 1.12; z0 = 0.5; z1 = 0.66; r = 0.6; g = 0.6; b = 0.6; em = 2.0
+        elif i == 5:
+            ok = hf(cs, 74, 0, 0) < 0.7
+            x0 = 0.3; x1 = 1.15; y0 = 2.24; y1 = 2.52; z0 = RD - 0.22; z1 = RD; r = 0.80; g = 0.80; b = 0.78
+        elif i == 6:
+            ok = aux == 1
+            x0 = RW - 0.10; x1 = RW - 0.05; y0 = 0.8; y1 = 1.35; z0 = 2.2 - 1.6; z1 = 2.2 - 0.7; r = 0.02; g = 0.02; b = 0.02; em = 1.0
+    elif typ == K_:
+        kv = hf(cs, 69, 0, 0) < 0.6                     # the counter across the back, or down one side
+        if i == 0:
+            ok = True; x0 = 0.0; x1 = 0.6; y0 = 0.0; y1 = 0.85; z0 = 0.3; z1 = RD; r = 0.62; g = 0.60; b = 0.56
+            if kv:
+                x1 = RW; z0 = RD - 0.6
+            if hf(cs, 70, 0, 0) < 0.5:
+                r = 0.40; g = 0.28; b = 0.18
+        elif i == 1:
+            ok = True; x0 = 0.0; x1 = 0.36; y0 = 1.50; y1 = 2.25; z0 = 0.5; z1 = RD; r = 0.70; g = 0.66; b = 0.56
+            if kv:
+                x1 = RW - 0.75; z0 = RD - 0.36
+            if hf(cs, 70, 0, 0) < 0.5:
+                r = 0.44; g = 0.30; b = 0.18
+            elif hf(cs, 70, 1, 0) < 0.4:
+                r = 0.30; g = 0.42; b = 0.50
+        elif i == 2:
+            ok = hf(cs, 71, 0, 0) < 0.8
+            x0 = RW - 0.66; x1 = RW - 0.03; y0 = 0.0; y1 = 1.55 + 0.25 * hf(cs, 72, 0, 0); z0 = RD - 0.7; z1 = RD - 0.03; r = 0.78; g = 0.79; b = 0.80
+        elif i == 3:
+            ok = True; x0 = 0.0; x1 = 0.5; y0 = 1.36; y1 = 1.5; z0 = 1.2; z1 = 1.95; r = 0.5; g = 0.5; b = 0.52
+            if kv:
+                x0 = 0.25; x1 = 1.0; z0 = RD - 0.5; z1 = RD
+        elif i == 4:
+            ok = hf(cs, 73, 0, 0) < 0.7
+            x0 = 0.14; x1 = 0.44; y0 = 0.85; y1 = 1.02; z0 = 1.35; z1 = 1.65; r = 0.45; g = 0.45; b = 0.47
+            if kv:
+                x0 = 0.42; x1 = 0.76; z0 = RD - 0.48; z1 = RD - 0.14
+    else:
+        if i == 0:
+            ok = True; x0 = 1.06; x1 = 1.12; y0 = 0.0; y1 = 1.0; z0 = 0.4; z1 = RD; r = 0.25; g = 0.26; b = 0.27
+        elif i == 1:
+            ok = True; x0 = 1.12; x1 = RW; y0 = 0.0; y1 = 0.9; z0 = 1.3; z1 = RD; r = 0.5; g = 0.5; b = 0.5
+    if ok and side == 1:
+        t = x0; x0 = RW - x1; x1 = RW - t
+    return ok, x0, x1, y0, y1, z0, z1, r, g, b, em
+
+
+@njit(**NJ)
+def ray_box(ox, oy, oz, dx, dy, dz, x0, x1, y0, y1, z0, z1):
+    """nearest entry of a ray into a box: t and the axis of the face (0 none; +-1 x, +-2 y, +-3 z)."""
+    tn = -1e30; tf = 1e30; ax = 0
+    if abs(dx) < 1e-9:
+        if ox < x0 or ox > x1: return 1e30, 0
+    else:
+        a = (x0 - ox) / dx; b = (x1 - ox) / dx; s = -1
+        if a > b:
+            a, b = b, a; s = 1
+        if a > tn: tn = a; ax = s
+        if b < tf: tf = b
+    if abs(dy) < 1e-9:
+        if oy < y0 or oy > y1: return 1e30, 0
+    else:
+        a = (y0 - oy) / dy; b = (y1 - oy) / dy; s = -2
+        if a > b:
+            a, b = b, a; s = 2
+        if a > tn: tn = a; ax = s
+        if b < tf: tf = b
+    if abs(dz) < 1e-9:
+        if oz < z0 or oz > z1: return 1e30, 0
+    else:
+        a = (z0 - oz) / dz; b = (z1 - oz) / dz; s = -3
+        if a > b:
+            a, b = b, a; s = 3
+        if a > tn: tn = a; ax = s
+        if b < tf: tf = b
+    if tn > tf or tf < 1e-5 or tn < 1e-5:
+        return 1e30, 0
+    return tn, ax
+
+
+@njit(**NJ)
+def seg_blocked(typ, cs, RW, RD, side, aux, px, py, pz, qx, qy, qz, nb):
+    dx = qx - px; dy = qy - py; dz = qz - pz
+    for i in range(nb):
+        ok, x0, x1, y0, y1, z0, z1, r, g, b, em = fbox(typ, cs, i, RW, RD, side, aux)
+        if ok and em == 0.0:
+            t, ax = ray_box(px, py, pz, dx, dy, dz, x0, x1, y0, y1, z0, z1)
+            if t < 0.999:
+                return True
+    return False
+
+
+@njit(**NJ)
+def ray_ell(ox, oy, oz, dx, dy, dz, cx, cy, cz, rx, ry, rz):
+    ax = (ox - cx) / rx; ay = (oy - cy) / ry; az = (oz - cz) / rz
+    bx_ = dx / rx; by = dy / ry; bz = dz / rz
+    A = bx_ * bx_ + by * by + bz * bz; B = ax * bx_ + ay * by + az * bz; C = ax * ax + ay * ay + az * az - 1.0
+    D = B * B - A * C
+    if D < 0.0:
+        return 1e30
+    t = (-B - math.sqrt(D)) / A
+    return t if t > 1e-4 else 1e30
+
+
+@njit(**NJ)
+def room_rgb(seed, typ, bid, fl, f, tell, xl, yl, du, dv, dw):
+    """the ray has reached the glass of this opening at (xl, yl), going (du, dv, dw) in the bay's own
+    frame (dw < 0 is inward).  Returns what comes back out through the pane."""
+    ox0, ox1, oy0, oy1, zg = opening(typ)
+    rx0, rx1, RD = roomdim(typ)
+    RW = rx1 - rx0; RH = 2.76
+    cs, fs, on, I, li, ck, cl, cr, ci, aux, bath, home = room_state(seed, typ, bid, fl, f, tell)
+    lr = LAMPS[li, 0]; lg = LAMPS[li, 1]; lb = LAMPS[li, 2]
+    # ---- the frame
+    e = 0.045
+    fr = (xl - ox0) < e or (ox1 - xl) < e or (yl - oy0) < e or (oy1 - yl) < e
+    ow = ox1 - ox0
+    fx = (xl - ox0) / ow
+    pane = 0
+    if typ == K_:
+        fr = fr or abs(fx - 0.5) * ow < 0.022
+        pane = 0 if fx < 0.5 else 1
+    elif typ == B_:
+        fr = fr or abs(fx - 0.27) * ow < 0.022 or abs(fx - 0.73) * ow < 0.022 or abs(yl - (oy1 - 0.42)) < 0.02
+        pane = (0 if fx < 0.27 else (1 if fx < 0.73 else 2)) + (3 if yl > oy1 - 0.42 else 0)
+    elif typ == L_:
+        fr = fr or abs(fx - 0.3333) * ow < 0.028 or abs(fx - 0.6667) * ow < 0.028
+        pane = 0 if fx < 0.3333 else (1 if fx < 0.6667 else 2)
+    else:
+        fr = fr or abs(fx - 0.5) * ow < 0.022 or abs(yl - 0.5 * (oy0 + oy1)) < 0.022
+        pane = (0 if fx < 0.5 else 1) + (2 if yl > 0.5 * (oy0 + oy1) else 0)
+    if fr:
+        a = 0.42 if hf(seed, 5, 5, 5) < 0.6 else 0.12
+        k = 0.30 if typ == L_ else 0.8
+        return a * SKY_E[0] * k / math.pi, a * SKY_E[1] * k / math.pi, a * SKY_E[2] * k / math.pi
+    # ---- the pane: a little of the sky comes back
+    wob = (hf(cs, 90, pane, 0) - 0.5) * 0.22
+    er, eg, eb = env(dv, wob)
+    R = 0.055 + 0.6 * (1.0 + dw) ** 4
+    if typ == L_:
+        R *= 0.45                                       # the balcony above shades most of it
+        if pane == int(hf(cs, 91, 0, 0) * 5.0):         # a leaf slid open
+            R = 0.0
+    T = 0.86 * (1.0 - R)
+    rr = er * R; rg = eg * R; rb = eb * R
+    X = xl - rx0; Y = yl - 0.02
+    dX = du; dY = dv; dZ = -dw
+    # ---- frosted glass
+    if bath:
+        if on:
+            g = 0.016 * I * (0.8 + 0.4 * noise2(xl * 9.0 + cs % 97, yl * 9.0)) * (1.0 - 0.3 * abs(fx - 0.5))
+            return rr + g * lr, rr * 0 + rg + g * lg, rb + g * lb
+        k = 0.25 / math.pi
+        return rr + SKY_E[0] * k * 0.5, rg + SKY_E[1] * k * 0.5, rb + SKY_E[2] * k * 0.5
+    # ---- what stands on the sill inside
+    if typ == K_ or (typ == B_ and hf(cs, 140, 0, 0) < 0.5):
+        n = int(hf(cs, 141, 0, 0) * (5.99 if typ == K_ else 3.99))
+        for i in range(n):
+            qx = ox0 + 0.08 + (ow - 0.16) * hf(cs, 142, i, 0); hw = 0.025 + 0.045 * hf(cs, 143, i, 0)
+            hh0 = 0.07 + 0.22 * hf(cs, 144, i, 0) * (0.5 + 0.5 * hf(cs, 145, i, 0))
+            if abs(xl - qx) < hw and yl < oy0 + 0.045 + hh0:
+                k = int(hf(cs, 146, i, 0) * 11.99)
+                q = (0.02 * I if on else 0.0) + 0.004
+                return rr + T * CLOTH[k, 0] * q * lr, rg + T * CLOTH[k, 1] * q * lg, rb + T * CLOTH[k, 2] * q * lb
+    # ---- curtains, a hand behind the glass
+    tc = 0.20 / dZ
+    xc = (X + dX * tc + rx0 - ox0) / ow
+    yc = Y + dY * tc
+    cover = 0.0; sheer = 0.0
+    if ck == 1:
+        if xc < cl or xc > 1.0 - cr: cover = 1.0
+    elif ck == 2:
+        if xc < cl or xc > 1.0 - cr: cover = 1.0
+        else: sheer = 1.0
+    elif ck == 3:
+        if yc > oy1 - 0.02 - cl * (oy1 - oy0): cover = 1.0
+    cr_ = CURT[ci, 0]; cg_ = CURT[ci, 1]; cb_ = CURT[ci, 2]
+    if cover > 0.0 or sheer > 0.0:
+        gath = 1.0
+        if ck == 1 or ck == 2:
+            wd = cl if xc < 0.5 else cr                 # the less a curtain is drawn the more it is gathered
+            gath = 0.45 + 0.55 * min(1.0, wd / 0.5)
+        ph = xc * ow / (0.05 + 0.07 * gath) + 6.0 * hf(cs, 92, 0, 0) + 1.6 * noise2(xc * ow * 5.0 + cs % 29, yc * 0.5)
+        pleat = 0.42 + 0.58 * abs(math.sin(ph * math.pi)) ** 0.8
+        pleat *= (0.8 + 0.4 * noise2(xc * ow * 2.0 + cs % 31, yc * 0.7)) * (0.72 + 0.20 * yc)
+        if ck == 3:
+            pleat = 0.92 + 0.08 * math.sin(yc * 60.0)
+        if on:
+            lx = RW * 0.5; lz = 0.45 * RD
+            d2 = (X - lx) ** 2 + (Y - RH) ** 2 + lz * lz
+            back = I * (0.55 / d2 + 0.045)
+            cr0 = cr_ * lr * back * 0.14 * pleat * gath; cg0 = cg_ * lg * back * 0.14 * pleat * gath; cb0 = cb_ * lb * back * 0.14 * pleat * gath
+        else:
+            k = 0.5 / math.pi * pleat
+            if aux == 3 or aux == 1:
+                k *= 1.6
+            cr0 = cr_ * SKY_E[0] * k; cg0 = cg_ * SKY_E[1] * k; cb0 = cb_ * SKY_E[2] * k
+        if cover > 0.0:
+            return rr + T * cr0, rg + T * cg0, rb + T * cb0
+    # ---- into the room
+    side = 1 if hf(cs, 93, 0, 0) < 0.5 else 0
+    nb = 9 if typ == L_ else (7 if typ == B_ else (5 if typ == K_ else 2))
+    # the lamp
+    pend = hf(cs, 94, 0, 0) < 0.35 and typ != K_ and typ != C_
+    lx = RW * (0.42 + 0.16 * hf(cs, 95, 0, 0)); lz = RD * (0.40 + 0.14 * hf(cs, 96, 0, 0))
+    ly = RH - (0.55 if pend else 0.10)
+    lrad = 0.17 if pend else 0.21
+    wk = int(hf(fs, 97, 0, 0) * 7.99)
+    if hf(fs, 98, 0, 0) < 0.45:
+        wk = 0
+    war = WALLS[wk, 0]; wag = WALLS[wk, 1]; wab = WALLS[wk, 2]
+    if typ == K_:
+        war = 0.80; wag = 0.81; wab = 0.80
+    if typ == C_:
+        war = 0.55; wag = 0.56; wab = 0.56
+    # walls
+    tb = 1e30; ax = 0
+    if dX > 1e-9:
+        t = (RW - X) / dX
+        if t < tb: tb = t; ax = 1
+    elif dX < -1e-9:
+        t = -X / dX
+        if t < tb: tb = t; ax = -1
+    if dY > 1e-9:
+        t = (RH - Y) / dY
+        if t < tb: tb = t; ax = 2
+    elif dY < -1e-9:
+        t = -Y / dY
+        if t < tb: tb = t; ax = -2
+    t = RD / dZ
+    if t < tb: tb = t; ax = 3
+    hit = 0                                             # 0 wall, 1 furniture, 2 lamp, 3 body, 4 head
+    ar = war; ag = wag; ab = wab; nx = 0.0; ny = 0.0; nz = 0.0; em = 0.0
+    if ax == 1: nx = -1.0
+    elif ax == -1: nx = 1.0
+    elif ax == 2: ny = -1.0
+    elif ax == -2: ny = 1.0
+    else: nz = -1.0
+    for i in range(nb):
+        ok, x0, x1, y0, y1, z0, z1, r, g, b, e2 = fbox(typ, cs, i, RW, RD, side, aux)
+        if ok:
+            t, a = ray_box(X, Y, 0.0, dX, dY, dZ, x0, x1, y0, y1, z0, z1)
+            if t < tb:
+                tb = t; hit = 1; ar = r; ag = g; ab = b; nx = 0.0; ny = 0.0; nz = 0.0; em = e2
+                if a == 1 or a == -1: nx = float(a)
+                elif a == 2 or a == -2: ny = 0.5 * a
+                else: nz = a / 3.0
+    # the lamp itself
+    if typ == K_ or typ == C_:
+        t, a = ray_box(X, Y, 0.0, dX, dY, dZ, lx - 0.04, lx + 0.04, RH - 0.07, RH - 0.02, lz - 0.6, lz + 0.6)
+        if t < tb and on:
+            tb = t; hit = 2
+    else:
+        t = ray_ell(X, Y, 0.0, dX, dY, dZ, lx, ly + (0.0 if pend else 0.1), lz, lrad, lrad * (1.0 if pend else 0.5), lrad)
+        if t < tb:
+            tb = t; hit = 2
+    # somebody
+    who = hf(cs, 100, 0, 0)
+    pp = 0.34 if typ == L_ else (0.22 if typ == B_ else (0.36 if typ == K_ else 0.0))
+    if tell:
+        who = 0.0
+    if home and (on or aux == 1) and who < pp:
+        sit = (typ == L_ and hf(cs, 101, 0, 0) < 0.6) or tell
+        if typ == L_:
+            if tell:
+                hx = 1.1 + (RW - 2.2) * hf(cs, 74, 0, 0) + 0.2; hz = 3.42
+                if side == 1: hx = RW - hx
+            elif sit:
+                hx = 0.62; hz = 1.3 + 1.5 * hf(cs, 102, 0, 0)
+                if side == 1: hx = RW - hx
+            else:
+                hx = 1.2 + (RW - 2.0) * hf(cs, 102, 0, 0); hz = 0.6 + 2.6 * hf(cs, 103, 0, 0)
+        elif typ == B_:
+            hx = 1.9 + 0.6 * hf(cs, 102, 0, 0); hz = 0.5 + 1.2 * hf(cs, 103, 0, 0)
+            if side == 1: hx = RW - hx
+        else:
+            hx = 0.95 + 0.2 * hf(cs, 102, 0, 0); hz = 0.5 + 1.6 * hf(cs, 103, 0, 0)
+            if side == 1: hx = RW - hx
+        hh = 1.50 + 0.2 * hf(cs, 104, 0, 0)
+        if sit:
+            hh = 1.20
+        t = ray_ell(X, Y, 0.0, dX, dY, dZ, hx, hh * 0.52 + (0.12 if sit else 0.0), hz, 0.20, hh * 0.40 if not sit else 0.42, 0.14)
+        if t < tb:
+            tb = t; hit = 3
+            k = int(hf(cs, 105, 0, 0) * 11.99)
+            ar = CLOTH[k, 0]; ag = CLOTH[k, 1]; ab = CLOTH[k, 2]
+            px = X + dX * t; py = Y + dY * t; pz = dZ * t
+            nx = (px - hx) / 0.04; ny = (py - hh * 0.52) / 0.36; nz = (pz - hz) / 0.02
+            q = 1.0 / math.sqrt(nx * nx + ny * ny + nz * nz); nx *= q; ny *= q; nz *= q
+        t = ray_ell(X, Y, 0.0, dX, dY, dZ, hx, hh - 0.02, hz, 0.105, 0.125, 0.11)
+        if t < tb:
+            tb = t; hit = 4
+            ar = 0.50; ag = 0.34; ab = 0.25
+            px = X + dX * t; py = Y + dY * t; pz = dZ * t
+            if (py - hh + 0.02) > 0.02 or pz > hz + 0.02:
+                ar = 0.03; ag = 0.025; ab = 0.02
+            nx = (px - hx); ny = (py - hh + 0.02); nz = (pz - hz)
+            q = 1.0 / math.sqrt(nx * nx + ny * ny + nz * nz + 1e-9); nx *= q; ny *= q; nz *= q
+    px = X + dX * tb; py = Y + dY * tb; pz = dZ * tb
+    cr1 = 0.0; cg1 = 0.0; cb1 = 0.0
+    if hit == 2:
+        if on:
+            k = 3.2 * I
+            cr1 = lr * k; cg1 = lg * k; cb1 = lb * k
+        else:
+            cr1 = 0.0
+            ar = 0.7; ag = 0.7; ab = 0.7; ny = -1.0; hit = 1
+    if hit != 2 and em > 0.0:
+        if em == 1.0 and ((side == 0 and nx < -0.5) or (side == 1 and nx > 0.5)):
+            k = int(hf(cs, 106, 0, 0) * 4.99)
+            sc = 0.5 + 0.5 * noise2(pz * 5.0 + cs % 17, py * 5.0)
+            cr1 = TVC[k, 0] * 0.9 * sc; cg1 = TVC[k, 1] * 0.9 * sc; cb1 = TVC[k, 2] * 0.9 * sc
+            hit = 2
+        elif em == 2.0:
+            cr1 = 2.4; cg1 = 1.5; cb1 = 0.7; hit = 2
+    if hit != 2:
+        # what is painted or hung on the walls and the floor
+        if hit == 0:
+            if ax == -2:                                # floor
+                fk = hf(fs, 110, 0, 0)
+                if typ == K_ or typ == C_ or fk < 0.4:
+                    ar = 0.52; ag = 0.51; ab = 0.48
+                    if (px % 0.6) < 0.012 or (pz % 0.6) < 0.012:
+                        ar *= 0.8; ag *= 0.8; ab *= 0.8
+                else:
+                    q = 0.9 + 0.2 * hf(int(px / 0.12), cs % 1000, 3, 3)
+                    ar = 0.36 * q; ag = 0.23 * q; ab = 0.13 * q
+            elif ax == 2:
+                ar = 0.84; ag = 0.84; ab = 0.82
+            else:
+                if py < 0.09 and typ != K_:
+                    ar *= 0.5; ag *= 0.45; ab *= 0.4
+                if typ == K_:
+                    if (py % 0.3) < 0.012 or ((px + pz) % 0.3) < 0.012:
+                        ar *= 0.86; ag *= 0.86; ab *= 0.86
+                if typ == C_ and ax == 3:
+                    q = py - 0.2 - (px - 0.2) * 0.9
+                    if hf(cs, 150, 0, 0) < 0.5:
+                        q = py - 0.2 - (RW - 0.2 - px) * 0.9
+                    if q < 0.0 and q > -0.30:
+                        ar *= 0.45; ag *= 0.45; ab *= 0.45
+                    elif q < 0.0:
+                        ar *= 0.75; ag *= 0.75; ab *= 0.75
+                if ax == 3:
+                    # the door to the hall
+                    d0 = 0.15 + (RW - 1.3) * hf(cs, 111, 0, 0)
+                    if typ == K_:
+                        d0 = RW - 1.75
+                    if px > d0 and px < d0 + 0.9 and py < 2.05 and typ != C_:
+                        if aux == 3:
+                            k = 0.30 * (0.6 + 0.4 * sstep(0.0, 2.0, py))
+                            cr1 = lr * k; cg1 = lg * k; cb1 = lb * k; hit = 2
+                        elif hf(cs, 112, 0, 0) < 0.35:
+                            ar = 0.05; ag = 0.045; ab = 0.04
+                        else:
+                            ar = 0.40; ag = 0.27; ab = 0.16
+                            if hf(cs, 113, 0, 0) < 0.3:
+                                ar = 0.74; ag = 0.73; ab = 0.70
+                    elif typ != K_ and typ != C_:
+                        for j in range(3):
+                            if hf(cs, 114, j, 0) < 0.55:
+                                qx = 0.3 + (RW - 0.6) * hf(cs, 115, j, 0); qy = 1.25 + 0.6 * hf(cs, 116, j, 0)
+                                hw = 0.16 + 0.3 * hf(cs, 117, j, 0); hh2 = 0.14 + 0.25 * hf(cs, 118, j, 0)
+                                if abs(px - qx) < hw and abs(py - qy) < hh2:
+                                    if abs(px - qx) > hw - 0.03 or abs(py - qy) > hh2 - 0.03:
+                                        ar = 0.16; ag = 0.11; ab = 0.07
+                                    else:
+                                        k = int(hf(cs, 119, j, 0) * 11.99)
+                                        q = 0.5 + 0.5 * noise2(px * 7.0 + j * 9.1, py * 7.0 + cs % 13)
+                                        ar = 0.25 + 0.6 * CLOTH[k, 0] * q; ag = 0.25 + 0.6 * CLOTH[k, 1] * q; ab = 0.25 + 0.55 * CLOTH[k, 2] * q
+                        if hf(cs, 120, 0, 0) < 0.3:
+                            qx = 0.4 + (RW - 0.8) * hf(cs, 121, 0, 0)
+                            d2 = (px - qx) ** 2 + (py - 2.15) ** 2
+                            if d2 < 0.0256:
+                                ar = 0.85; ag = 0.85; ab = 0.82
+                                if d2 > 0.018:
+                                    ar = 0.1; ag = 0.1; ab = 0.1
+    if hit != 2:
+        Er = 0.0; Eg = 0.0; Eb = 0.0
+        sx = px + nx * 0.01; sy = py + ny * 0.01; sz = pz + nz * 0.01
+        if on:
+            vx = lx - sx; vy = ly - sy; vz = lz - sz
+            d2 = vx * vx + vy * vy + vz * vz; d = math.sqrt(d2)
+            c = (vx * nx + vy * ny + vz * nz) / d
+            if hit == 0 and ax == 2:                                         # the ceiling: a pool round the fitting
+                if pend:
+                    c = 0.5 / (d + 0.3)
+                else:
+                    c = 0.085 * d2 / ((px - lx) ** 2 + (pz - lz) ** 2 + 0.05)
+            if c > 0.0:
+                if not seg_blocked(typ, cs, RW, RD, side, aux, sx, sy, sz, lx, ly, lz, nb):
+                    k = 1.25 * I * c / max(d2, 0.09)
+                    Er += lr * k; Eg += lg * k; Eb += lb * k
+            k = I * 4.0 * math.pi * 0.75 / (2.0 * (RW * RD + RW * RH + RD * RH))
+            k *= 0.55 + 0.45 * sstep(0.0, 0.8, py)                           # less under things
+            if hit == 0:                                                     # and less in the corners
+                e1 = min(px, RW - px) if (ax != 1 and ax != -1) else 9.0
+                e2 = min(py, RH - py) if (ax != 2 and ax != -2) else 9.0
+                e3 = (RD - pz) if ax != 3 else 9.0
+                k *= 0.62 + 0.38 * sstep(0.0, 0.55, min(e1, min(e2, e3)))
+            Er += lr * k * (0.5 + 0.5 * war); Eg += lg * k * (0.5 + 0.5 * wag); Eb += lb * k * (0.5 + 0.5 * wab)
+        # the sky through the window
+        wx_ = (ox0 + ox1) * 0.5 - rx0; wy_ = (oy0 + oy1) * 0.5
+        vx = wx_ - sx; vy = wy_ - sy; vz = -sz
+        d2 = vx * vx + vy * vy + vz * vz + 0.3; d = math.sqrt(d2)
+        c = max(0.0, (vx * nx + vy * ny + vz * nz) / d) + 0.15
+        k = 0.34 * (ox1 - ox0) * (oy1 - oy0) * c * (sz + 0.3) / (d * d2) * (0.35 if typ == L_ else 1.0) * (1.0 - 0.7 * sheer)
+        Er += SKY_E[0] * k; Eg += SKY_E[1] * k; Eb += SKY_E[2] * k
+        if aux == 1:                                    # the television
+            k = int(hf(cs, 106, 0, 0) * 4.99)
+            tx = RW - 0.13; tz = 2.1; ty = 0.95
+            if typ == B_:
+                tz = 1.05; tx = RW - 0.1
+            if side == 1: tx = RW - tx
+            vx = tx - sx; vy = ty - sy; vz = tz - sz
+            d2 = vx * vx + vy * vy + vz * vz + 0.2; d = math.sqrt(d2)
+            c = max(0.0, (vx * nx + vy * ny + vz * nz) / d)
+            fc = max(0.0, (-vx / d) * (1.0 if side == 1 else -1.0))
+            q = 0.20 * c * (0.25 + fc) / d2 + 0.006
+            Er += TVC[k, 0] * q; Eg += TVC[k, 1] * q; Eb += TVC[k, 2] * q
+        elif aux == 2:
+            tx = RW - 0.44; ty = 1.0; tz = 0.58
+            if side == 1: tx = RW - tx
+            vx = tx - sx; vy = ty - sy; vz = tz - sz
+            d2 = vx * vx + vy * vy + vz * vz + 0.05; d = math.sqrt(d2)
+            c = max(0.0, (vx * nx + vy * ny + vz * nz) / d)
+            q = 0.10 * c / d2 + 0.004
+            Er += 1.0 * q; Eg += 0.62 * q; Eb += 0.30 * q
+        elif aux == 3:
+            d0 = 0.15 + (RW - 1.3) * hf(cs, 111, 0, 0) + 0.45
+            vx = d0 - sx; vy = 1.0 - sy; vz = RD - sz
+            d2 = vx * vx + vy * vy + vz * vz + 0.3; d = math.sqrt(d2)
+            c = max(0.0, (vx * nx + vy * ny + vz * nz) / d)
+            q = 0.20 * c * max(0.0, vz / d) / d2 + 0.004
+            Er += lr * q; Eg += lg * q; Eb += lb * q
+        cr1 = ar * Er / math.pi; cg1 = ag * Eg / math.pi; cb1 = ab * Eb / math.pi
+    if sheer > 0.0:
+        cr1 = 0.42 * cr1 + cr0 * 1.5 + 0.02 * cr1; cg1 = 0.42 * cg1 + cg0 * 1.5; cb1 = 0.42 * cb1 + cb0 * 1.5
+    return rr + T * cr1, rg + T * cg1, rb + T * cb1
+
+
+@njit(**NJ)
+def open_light(seed, typ, bid, fl, f, tell):
+    """how much light a lit opening throws outward: radiance, by colour."""
+    cs, fs, on, I, li, ck, cl, cr, ci, aux, bath, home = room_state(seed, typ, bid, fl, f, tell)
+    if not on:
+        if aux == 1:
+            k = int(hf(cs, 106, 0, 0) * 4.99)
+            return TVC[k, 0] * 0.004, TVC[k, 1] * 0.004, TVC[k, 2] * 0.004
+        return 0.0, 0.0, 0.0
+    k = 0.060 * I
+    if bath:
+        k *= 0.3
+    if ck == 1 or ck == 2:
+        k *= max(0.25, 1.0 - 0.8 * (cl + cr))
+    return LAMPS[li, 0] * k, LAMPS[li, 1] * k, LAMPS[li, 2] * k
+
+
+# ------------------------------------------------------------------ the block: four faces and a roof
+@njit(**NJ)
+def to_face(i, X, Y, Z, W, D):
+    if i == 0:
+        return X + 0.5 * W, Y, Z - 0.5 * D
+    if i == 1:
+        return 0.5 * D - Z, Y, X - 0.5 * W
+    if i == 2:
+        return 0.5 * W - X, Y, -Z - 0.5 * D
+    return Z + 0.5 * D, Y, -X - 0.5 * W
+
+
+@njit(**NJ)
+def dir_face(i, dX, dY, dZ):
+    if i == 0:
+        return dX, dY, dZ
+    if i == 1:
+        return -dZ, dY, dX
+    if i == 2:
+        return -dX, dY, -dZ
+    return dZ, dY, -dX
+
+
+@njit(**NJ)
+def dir_unface(i, du, dv, dw):
+    if i == 0:
+        return du, dv, dw
+    if i == 1:
+        return dw, dv, -du
+    if i == 2:
+        return -du, dv, -dw
+    return -dw, dv, du
+
+
+@njit(**NJ)
+def tower_sdf(X, Y, Z, W, D, nf, seed, fa, fb):
+    """one block in its own frame; only the faces the ray can meet (fa, fb) are built."""
+    H = nf * FH
+    u, v, w = to_face(fa, X, Y, Z, W, D)
+    dw, da, ma = face_sdf(u, v, w, W if (fa % 2 == 0) else D, nf, seed * 4 + fa)
+    face = fa
+    if fb >= 0:
+        u, v, w = to_face(fb, X, Y, Z, W, D)
+        dw2, da2, ma2 = face_sdf(u, v, w, W if (fb % 2 == 0) else D, nf, seed * 4 + fb)
+        if da2 < da:
+            da = da2; ma = ma2; face = fb
+        if dw2 > dw:
+            dw = dw2
+            if dw2 < da: face = fb
+    top = Y - H
+    if top > dw:
+        dw = top
+    if Y > H - 0.5:                                      # parapet, the lift room, a tank
+        d = max(max(sd_box2(X, Z, 0.5 * W, 0.5 * D), -sd_box2(X, Z, 0.5 * W - 0.2, 0.5 * D - 0.2)), Y - H - 1.15)
+        if d < da: da = d; ma = M_ROOF
+        ox = (hf(seed, 1, 2, 3) - 0.5) * (W - 14.0)
+        d = sd_box(X - ox, Y - H - 1.9, Z, 3.6, 1.9, 2.6)
+        if d < da: da = d; ma = M_ROOF
+        d = sd_box(X - ox - 6.0, Y - H - 1.0, Z + 1.0, 1.2, 1.0, 1.2)
+        if d < da: da = d; ma = M_ROOF
+    if da < dw:
+        return da, ma, face
+    return dw, M_WALL, face
+
+
+@njit(**NJ)
+def tnormal(X, Y, Z, W, D, nf, seed, fa, fb):
+    e = 0.004
+    a, m, f = tower_sdf(X + e, Y - e, Z - e, W, D, nf, seed, fa, fb)
+    b, m, f = tower_sdf(X - e, Y - e, Z + e, W, D, nf, seed, fa, fb)
+    c, m, f = tower_sdf(X - e, Y + e, Z - e, W, D, nf, seed, fa, fb)
+    d, m, f = tower_sdf(X + e, Y + e, Z + e, W, D, nf, seed, fa, fb)
+    nx = a - b - c + d; ny = -a - b + c + d; nz = -a + b - c + d
+    q = 1.0 / math.sqrt(nx * nx + ny * ny + nz * nz + 1e-18)
+    return nx * q, ny * q, nz * q
+
+
+@njit(**NJ)
+def tshadow(X, Y, Z, dx, dy, dz, tmax, W, D, nf, seed, fa, fb):
+    t = 0.03; res = 1.0
+    for _ in range(48):
+        d, m, f = tower_sdf(X + dx * t, Y + dy * t, Z + dz * t, W, D, nf, seed, fa, fb)
+        if d < 0.002:
+            return 0.0
+        res = min(res, 14.0 * d / t)
+        t += max(d, 0.012)
+        if t >= tmax:
+            break
+    return max(res, 0.0)
+
+
+@njit(**NJ)
+def mat_albedo(m, u, v, cs, seed, typ, xl):
+    k = m // 100; m = m % 100
+    if m == M_WALL:
+        # small glazed tile, cream, with a grey band at every slab; what has run down it over the years
+        yl = v % FH; f = int(v / FH)
+        r = 0.62; g = 0.57; b = 0.47
+        if typ == K_:
+            r = 0.47; g = 0.48; b = 0.49
+        elif typ == L_:
+            r = 0.70; g = 0.68; b = 0.62
+        elif typ == C_:
+            r = 0.43; g = 0.39; b = 0.35
+        if yl < 0.10 or yl > FH - 0.10:
+            r = 0.40; g = 0.41; b = 0.42
+        q = 0.80 + 0.22 * fbm2(u * 0.9, v * 0.25, 3) + 0.26 * fbm2(u * 0.11 + 3.0, v * 0.07, 3)
+        q += 0.07 * (hf(int(u / 0.6), int(v / 0.3), 5, 5) - 0.5)
+        if hf(int(u / 1.2), int(v / 0.9), 6, seed % 1000) < 0.035:            # a patch retiled
+            q *= 1.22
+        # what has run down it: from every slab, and from under every sill and ledge
+        col = fbm2(u * 7.0, f * 3.7 + 1.3, 2)
+        run = sstep(0.42, 0.75, col)
+        q *= 1.0 - 0.34 * run * sstep(1.3, 0.0, FH - yl) - 0.10 * sstep(0.5, 0.0, FH - yl)
+        if typ == B_ or typ == K_:
+            oy0 = 0.50 if typ == B_ else 0.95
+            if yl < oy0:
+                col2 = fbm2(u * 11.0 + 7.0, f * 5.1, 2)
+                q *= 1.0 - 0.45 * sstep(0.40, 0.70, col2) * (0.35 + 0.65 * yl / oy0)
+        if typ == B_ and xl > 2.5 and yl < 0.32:
+            q *= 0.62 + 0.38 * sstep(0.0, 0.32, 0.32 - yl) * 0.0 + 0.2 * noise2(u * 14.0, f * 1.0)
+        if (u % 0.10) < 0.008 or (v % 0.05) < 0.005:
+            q *= 0.93
+        return r * q, g * q, b * q
+    if m == M_CONC or m == M_ROOF:
+        q = 0.75 + 0.5 * fbm2(u * 3.0, v * 3.0, 3)
+        return 0.40 * q, 0.40 * q, 0.39 * q
+    if m == M_METAL:
+        return 0.34, 0.35, 0.36
+    if m == M_CLOTH:
+        q = 0.62 + 0.30 * math.sin(u * 46.0 + 5.0 * noise2(u * 3.0, v * 2.0) + cs % 7) + 0.25 * noise2(u * 9.0 + k, v * 6.0)
+        q *= 0.8
+        return CLOTH[k - 1, 0] * q, CLOTH[k - 1, 1] * q, CLOTH[k - 1, 2] * q
+    if m == M_PLANT:
+        q = 0.35 + 1.1 * noise2(u * 38.0, v * 38.0)
+        return 0.09 * q, 0.19 * q, 0.06 * q
+    if m == M_AC:
+        return 0.70, 0.70, 0.67
+    if m == M_PIPE:
+        return 0.56, 0.55, 0.52
+    if m == M_WHITE:
+        return 0.72, 0.72, 0.70
+    if m == M_POT:
+        return 0.42, 0.24, 0.15
+    if m == M_CRATE:
+        c = (0.36, 0.26, 0.16) if k == 0 else ((0.20, 0.30, 0.44) if k == 1 else ((0.52, 0.50, 0.44) if k == 2 else ((0.26, 0.36, 0.28) if k == 3 else ((0.60, 0.56, 0.30) if k == 4 else (0.30, 0.30, 0.32)))))
+        return c
+    if m == M_GAS:
+        return 0.62, 0.50, 0.12
+    return 0.5, 0.5, 0.5
+
+
+@njit(**NJ)
+def trace_tower(ox, oy, oz, dx, dy, dz, cx, cz, cyaw, syaw, W, D, nf, seed, base, ugr, ugg, ugb, s):
+    """one ray against one block.  Returns (t, r, g, b, state); t < 0 is a miss."""
+    H = nf * FH
+    # into the block's frame
+    rx = ox - cx; rz = oz - cz
+    X0 = cyaw * rx - syaw * rz; Z0 = syaw * rx + cyaw * rz; Y0 = oy - base
+    dX = cyaw * dx - syaw * dz; dZ = syaw * dx + cyaw * dz; dY = dy
+    t0, a = ray_box(X0, Y0, Z0, dX, dY, dZ, -0.5 * W - 0.7, 0.5 * W + 0.7, -1.0, H + 4.0, -0.5 * D - 0.7, 0.5 * D + 0.7)
+    if t0 > 1e29:
+        return -1.0, 0.0, 0.0, 0.0, s
+    fa = -1; fb = -1
+    if dZ < -1e-6: fa = 0
+    elif dZ > 1e-6: fa = 2
+    if dX < -1e-6: fb = 1
+    elif dX > 1e-6: fb = 3
+    if fa < 0:
+        fa = fb; fb = -1
+    t = t0; hitm = 0; face = 0
+    eps = 0.0025 + 0.00002 * t0
+    for _ in range(220):
+        d, m, face = tower_sdf(X0 + dX * t, Y0 + dY * t, Z0 + dZ * t, W, D, nf, seed, fa, fb)
+        if d < eps:
+            hitm = m; break
+        t += d
+        if t > t0 + W + D + 60.0:
+            break
+    if hitm == 0:
+        return -1.0, 0.0, 0.0, 0.0, s
+    X = X0 + dX * t; Y = Y0 + dY * t; Z = Z0 + dZ * t
+    Wf = W if (face % 2 == 0) else D
+    u, v, w = to_face(face, X, Y, Z, W, D)
+    du, dv, dw = dir_face(face, dX, dY, dZ)
+    fseed = seed * 4 + face
+    inface = v >= 0.0 and v < H
+    f = int(v / FH) if inface else 0
+    yl = v - f * FH
+    bid, typ, x0, bw, mir, fl = bay_of(u, Wf)
+    xl = u - x0
+    if mir == 1:
+        xl = bw - xl; du = -du
+    tell = (seed == SEED % 100000 and face == 0 and f == TELL_F - 1 and bid == TELL_BAY - 1)
+    if hitm == M_WALL and inface and typ != W_:
+        ox0, ox1, oy0, oy1, zg = opening(typ)
+        if w < zg + 0.01 and xl > ox0 and xl < ox1 and yl > oy0 and yl < oy1 and dw < 0.0:
+            r, g, b = room_rgb(fseed, typ, bid, fl, f, tell, xl, yl, du, dv, dw)
+            return t, r, g, b, s
+    if hitm == M_LANT:
+        q = 0.6 + 0.4 * abs(math.sin(u * 60.0))
+        return t, 1.25 * q, 0.10 * q, 0.035 * q, s
+    # ---- a surface out of doors
+    nX, nY, nZ = tnormal(X, Y, Z, W, D, nf, seed, fa, fb)
+    cs = hi(fseed, bid, f, 23)
+    ar, ag, ab = mat_albedo(hitm, u, v, cs, fseed, typ, xl)
+    if hitm % 100 == M_AC:
+        gx = xl - 2.88; gy = yl - 0.65
+        if gx * gx + gy * gy < 0.045 and w > 0.40:
+            q = 0.25 + 0.3 * abs(math.sin(math.sqrt(gx * gx + gy * gy) * 120.0))
+            ar *= q; ag *= q; ab *= q
+    # the sky, as much of it as this point sees
+    ao = 1.0
+    sc = 1.0
+    for i in range(1, 6):
+        h = 0.05 * i * i
+        d, m, fq = tower_sdf(X + nX * h, Y + nY * h, Z + nZ * h, W, D, nf, seed, fa, fb)
+        ao -= sc * max(0.0, h - d) / h * 0.20
+        sc *= 0.85
+    ao = max(ao, 0.0)
+    nu, nv, nw = dir_face(face, nX, nY, nZ)
+    # deep in a recess even less
+    rec = 1.0
+    if w < -0.05:
+        rec = 1.0 / (1.0 + 2.2 * (-w) ** 1.5)
+    k = (0.30 + 0.45 * max(0.0, nw) + 0.25 * (0.5 + 0.5 * nY)) * ao * rec
+    if hitm % 100 == M_CLOTH:
+        k *= 0.7
+    Er = SKY_E[0] * k; Eg = SKY_E[1] * k; Eb = SKY_E[2] * k
+    # the fog below, lit from under, lights the block from under
+    k = 0.40 * (0.25 + 0.50 * max(0.0, nw)) * (0.65 - 0.35 * nY) * ao * rec * math.exp(-max(Y + base - FOGTOP, 0.0) / 16.0)
+    Er += ugr * k; Eg += ugg * k; Eb += ugb * k
+    if inface and typ != W_:
+        if mir == 1:
+            nu = -nu
+        # the opening of this bay, as a lamp
+        lr, lg, lb = open_light(fseed, typ, bid, fl, f, tell)
+        if lr + lg + lb > 0.0:
+            ox0, ox1, oy0, oy1, zg = opening(typ)
+            for j in range(4):
+                s, r1 = lcg(s); s, r2 = lcg(s)
+                qx = ox0 + (ox1 - ox0) * 0.5 * ((j % 2) + r1); qy = oy0 + (oy1 - oy0) * 0.5 * ((j // 2) + r2); qz = zg + 0.02
+                vx = qx - xl; vy = qy - yl; vz = qz - w
+                d2 = vx * vx + vy * vy + vz * vz; d = math.sqrt(d2)
+                c1 = (vx * nu + vy * nv + vz * nw) / d
+                c2 = -vz / d
+                if hitm % 100 == M_CLOTH:
+                    c1 = 0.10 + 0.55 * abs(c1) if c1 > 0.0 else 0.22   # cloth lets some of the light through
+                elif hitm == M_PLANT:
+                    c1 = 0.2 + 0.6 * abs(c1)
+                if c1 > 0.0 and c2 > 0.0:
+                    lu = vx / d
+                    if mir == 1: lu = -lu
+                    lX, lY, lZ = dir_unface(face, lu, vy / d, vz / d)
+                    sh = tshadow(X + nX * 0.012, Y + nY * 0.012, Z + nZ * 0.012, lX, lY, lZ, d - 0.03, W, D, nf, seed, fa, fb)
+                    if hitm % 100 == M_CLOTH:
+                        sh = max(sh, 0.6)
+                    k = 0.25 * (ox1 - ox0) * (oy1 - oy0) * c1 * c2 / (d2 + 0.15) * sh
+                    Er += lr * k; Eg += lg * k; Eb += lb * k
+        if typ == L_:
+            fs, home, li = flat_state(fseed, fl, f)
+            if home and hf(cs, 130, 0, 0) < 0.035:      # a lamp on the balcony itself
+                vx = 1.95 - xl; vy = 2.66 - yl; vz = -0.75 - w
+                d2 = vx * vx + vy * vy + vz * vz; d = math.sqrt(d2)
+                c1 = (vx * nu + vy * nv + vz * nw) / d
+                if hitm % 100 == M_CLOTH:
+                    c1 = 0.3 + 0.7 * abs(c1)
+                if c1 > 0.0:
+                    lu = vx / d
+                    if mir == 1: lu = -lu
+                    lX, lY, lZ = dir_unface(face, lu, vy / d, vz / d)
+                    sh = tshadow(X + nX * 0.012, Y + nY * 0.012, Z + nZ * 0.012, lX, lY, lZ, d - 0.05, W, D, nf, seed, fa, fb)
+                    k = 0.16 * c1 / (d2 + 0.05) * sh
+                    lj = 3 if li < 3 else li
+                    Er += LAMPS[lj, 0] * k; Eg += LAMPS[lj, 1] * k; Eb += LAMPS[lj, 2] * k
+            if seed == SEED % 100000 and f == LANTERN_F - 1 and bid == LANTERN_BAY - 1:
+                vx = 1.95 - xl; vy = 2.30 - yl; vz = -0.10 - w
+                d2 = vx * vx + vy * vy + vz * vz; d = math.sqrt(d2)
+                c1 = max(0.0, (vx * nu + vy * nv + vz * nw) / d) + 0.1
+                k = 0.035 * c1 / (d2 + 0.04)
+                Er += 1.0 * k; Eg += 0.09 * k; Eb += 0.03 * k
+    r = ar * Er / math.pi; g = ag * Eg / math.pi; b = ab * Eb / math.pi
+    # the balcony glazed over: its panes return a little sky
+    if inface and typ == L_ and w < -0.07:
+        fs = hi(fseed, fl, f, 11)
+        if hf(fs, 40, 0, 0) < 0.32 and yl > 1.1 and yl < 2.3:
+            pane = int((xl - 0.10) / 0.925)
+            if pane != int(hf(cs, 131, 0, 0) * 6.0) and pane != int(hf(cs, 132, 0, 0) * 9.0):
+                er, eg, eb = env(dv, (hf(cs, 133, pane, 0) - 0.5) * 0.22)
+                R = 0.07
+                r = r * 0.88 + er * R; g = g * 0.88 + eg * R; b = b * 0.88 + eb * R
+    return t, r, g, b, s
+
+
+# ------------------------------------------------------------------ block 11: the frame
+@njit(**NJ)
+def infill(bid, f, side):
+    """what was built in this cell of the face before the money stopped: 0 nothing, 1 a block wall with
+    its opening, 2 a wall begun."""
+    if side == 0 and bid == LIT_BAY - 1 and f == LIT_F - 1:
+        return 1
+    if f >= NS - 1:
+        return 0
+    r = hf(77, bid, f, side); q = hf(78, f, side, 3)
+    lvl = 15.0 + 2.0 * hf(79, bid // 7, side, 1)         # the bricklayers had got about this far
+    if f < lvl - 1.0:
+        return 1 if r > 0.07 else (2 if r > 0.03 else 0)
+    if f < lvl + 3.0:
+        p = 0.75 - 0.2 * (f - lvl + 1.0) + 0.25 * (q - 0.5)
+        return 1 if r < p * 0.6 else (2 if r < p else 0)
+    return 2 if r < 0.035 else 0
+
+
+@njit(**NJ)
+def frame_sdf(x, y, w):
+    """block 11 in its own frame: x along the face, y up, w out of it toward the cab.  (distance, material)."""
+    zz = -w
+    dplan = sd_box2(x - 0.5 * FW, zz - 0.5 * FD, 0.5 * FW, 0.5 * FD)
+    if dplan > 1.6:
+        return dplan - 1.3, 0
+    if y > HT + 2.0:
+        return y - HT - 1.2, 0
+    d = 1e9; m = M_CONC
+    f = int(y / FH3)
+    if f < 0: f = 0
+    if f > NS - 1: f = NS - 1
+    yl = y - f * FH3
+    # slabs, and the beam under each edge
+    k = int(math.floor((y + 0.07) / FH3 + 0.5))
+    if k < 0: k = 0
+    if k > NS - 1: k = NS - 1
+    d = max(abs(y + 0.07 - FH3 * k) - 0.07, dplan)
+    by = y - (FH3 * k - 0.345)
+    e = min(zz, FD - zz)
+    e2 = min(x, FW - x)
+    d = min(d, max(sd_box2(by, e - 0.1, 0.205, 0.1), dplan))
+    d = min(d, max(sd_box2(by, e2 - 0.1, 0.205, 0.1), dplan))
+    xc = min(max(x, 0.001), FW - 0.001)
+    bid, typ, x0, bw, mir, fl = bay_of(xc, FW)
+    xl = x - x0
+    xm = bw - xl if mir == 1 else xl
+    dl = xl; dr = bw - xl
+    nearl = dl < dr
+    dxw = dl if nearl else dr
+    kk = bid % 7
+    side = 0 if zz < 0.5 * FD else 1
+    if y < HT:
+        # the walls across, one at every bay line
+        zc = min(abs(zz - 2.6), abs(zz - (FD - 2.6))) - 2.6
+        dc = max(max(abs(dxw) - 0.1, zc), dplan)
+        party = (nearl and (kk == 3 or kk == 6 or kk == 0)) or ((not nearl) and (kk == 2 or kk == 5 or kk == 6))
+        if not party:
+            hz = min(abs(zz - 3.55), abs(zz - (FD - 3.55))) - 0.55
+            dc = max(dc, -max(hz, yl - 2.1))
+        if dc < d: d = dc
+        # the gables
+        dg = max(abs(e2 - 0.1) - 0.1, dplan)
+        dg = max(dg, -max(abs(zz - 0.5 * FD) - 0.7, abs(yl - 1.55) - 0.65))
+        if dg < d: d = dg
+        # the walls along the corridor, a doorway to each room
+        dco = min(abs(zz - 5.3), abs(zz - (FD - 5.3))) - 0.1
+        dcx = 0.5 * bw if zz < 0.5 * FD else (0.5 * bw - 0.85 if mir == 0 else 0.5 * bw + 0.85)
+        dco = max(dco, -max(abs(xl - dcx) - (0.45 if f < 14 else 0.70), yl - 2.1))
+        dco = max(dco, dplan)
+        if dco < d: d = dco
+        if typ == C_:
+            dq = max(sd_box2(xl - 1.3, zz - 0.5 * FD, 1.1, 0.5 * FD - 5.4), dplan)
+            if dq < d: d = dq
+        # what the bricklayers left
+        st = infill(bid, f, side)
+        e0 = 1.4 if typ == L_ else 0.0
+        if st > 0 and f < NS - 1:
+            top = 2.46
+            if st == 2:
+                top = 0.5 + 1.5 * hf(81, bid, f, side) + 0.25 * int(3.0 * hf(82, bid * 31 + f, int(xm / 0.6), side))
+            dq = max(max(abs(e - e0 - 0.1) - 0.1, yl - top), abs(xl - 0.5 * bw) - 0.5 * bw + 0.1)
+            if st == 1:
+                ox0, ox1, oy0, oy1, zg = opening(typ)
+                dq = max(dq, -max(abs(xm - 0.5 * (ox0 + ox1)) - 0.5 * (ox1 - ox0), abs(yl - 0.5 * (oy0 + oy1)) - 0.5 * (oy1 - oy0)))
+            if dq < d: d = dq; m = M_BLOCK
+            if typ == L_ and hf(83, bid, f, side) < 0.6 and not (side == 0 and bid == LIT_BAY - 1 and f == LIT_F - 1):
+                dq = max(max(abs(e - 0.07) - 0.07, yl - 1.05), abs(xl - 0.5 * bw) - 0.5 * bw + 0.1)
+                if dq < d: d = dq; m = M_CONC
+        elif f < NS - 1:
+            r = hf(84, bid, f, side)
+            if r < 0.14:                                 # a pallet of blocks never laid
+                dq = bx(xm, yl, e, 0.5, 1.7, 0.0, 0.45 + 0.4 * hf(85, bid, f, side), 0.5, 1.4)
+                if dq < d: d = dq; m = M_BLOCK
+            elif r < 0.22:                               # a sheet of formwork ply against the wall
+                dq = bx(xm, yl, e, 0.12, 0.16, 0.0, 1.22, 0.6, 2.0 + 0.9 * hf(85, bid, f, side))
+                if dq < d: d = dq; m = M_PLY
+        if f >= NS - 4 and f < NS - 1:                   # props still under the last slabs poured
+            px = x - 1.2 * math.floor(x / 1.2) - 0.6; pz = zz - 1.2 * math.floor(zz / 1.2) - 0.6
+            dq = max(max(math.sqrt(px * px + pz * pz) - 0.032, dplan + 0.4), yl - 2.86)
+            if hf(86, int(x / 1.2), int(zz / 1.2), f) < 0.72 - 0.2 * (NS - 2 - f):
+                if dq < d: d = dq; m = M_METAL
+            else:
+                d = min(d, max(math.sqrt(px * px + pz * pz) + 0.25, 0.3))
+    else:
+        # starter bars out of the top of every wall
+        zc = min(abs(zz - 2.6), abs(zz - (FD - 2.6))) - 2.6
+        qz = zz - 0.2 * math.floor(zz / 0.2) - 0.1
+        hb = HT + 0.45 + 0.5 * hf(87, int(x / 0.3), int(zz / 0.2), 1)
+        dq = max(max(math.sqrt((abs(dxw) - 0.06) ** 2 + qz * qz) - 0.011, zc), y - hb)
+        dq = max(dq, dplan)
+        if dq < d: d = dq; m = M_REBAR
+        qx = x - 0.2 * math.floor(x / 0.2) - 0.1
+        ec = min(abs(zz - 5.3), abs(zz - (FD - 5.3)))
+        dq = max(max(math.sqrt((ec - 0.06) ** 2 + qx * qx) - 0.011, y - hb), dplan)
+        if dq < d: d = dq; m = M_REBAR
+    # safety net, what is left of it
+    if w > -0.3 and typ != C_:
+        hn = hf(95, bid, 2, 2)
+        if hn < 0.11:
+            ft = 17 + int(hf(96, bid, 2, 2) * 11.0); nl = 2 + int(hf(97, bid, 2, 2) * 3.99)
+            ytop = ft * FH3 - 0.2
+            ybot = (ft - nl) * FH3 + 2.2 * fbm2(x * 0.9, bid * 1.7, 3) + 0.25 * math.sin(x * 9.0)
+            dq = max(max(abs(w - 0.06 - 0.05 * math.sin(y * 1.1 + x * 0.7)) - 0.012, abs(xl - 0.5 * bw) - 0.5 * bw + 0.04), max(y - ytop, ybot - y))
+            if fbm2(x * 1.6 + 5.0, y * 0.9, 3) > 0.54:
+                dq = max(dq, 0.15)
+            dq = max(dq * 0.6, min(dq, 0.05)) if dq > 0.0 else dq
+            if dq < d: d = dq; m = M_NET
+    # the family, thirteenth floor
+    if side == 0 and bid == LIT_BAY - 1 and f == LIT_F - 1 and y < HT:
+        # washing on a line across the open front
+        dq = max(math.sqrt((yl - 2.02) ** 2 + (e - 0.35) ** 2) - 0.006, abs(xm - 1.95) - 1.85)
+        if dq < d: d = dq; m = M_METAL
+        for i in range(6):
+            gx = 0.50 + 0.36 * i + 0.06 * hf(90, i, 1, 1); gh = 0.5 + 0.45 * hf(91, i, 1, 1); gw = 0.13 + 0.07 * hf(92, i, 1, 1)
+            dq = bx(xm, yl, e, gx - gw, gx + gw, 2.02 - gh + 0.03 * math.sin(xm * 23.0 + i), 2.03, 0.335, 0.365)
+            if dq < d: d = dq; m = M_CLOTH + 100 * (1 + int(hf(93, i, 1, 1) * 11.99))
+        dq = bx(xm, yl, e, 2.45, 3.50, 0.0, 2.40, 1.36, 1.375)          # a tarpaulin over part of the doorway
+        if dq < d: d = dq; m = M_TARP
+        dq = bx(xm, yl, e, 0.25, 1.65, 0.0, 0.42, 3.3, 5.15)            # a bed made of pallets
+        if dq < d: d = dq; m = M_CLOTH + 400
+        dq = bx(xm, yl, e, 0.25, 1.65, 0.42, 0.55, 4.7, 5.15)
+        if dq < d: d = dq; m = M_CLOTH + 100
+        dq = bx(xm, yl, e, 2.5, 3.4, 0.66, 0.71, 2.3, 2.9)              # a table
+        dq = min(dq, bx(abs(xm - 2.95), yl, abs(e - 2.6), 0.38, 0.42, 0.0, 0.66, 0.24, 0.28))
+        if dq < d: d = dq; m = M_PLY
+        dq = bx(xm, yl, e, 2.6, 2.84, 0.71, 0.86, 2.4, 2.64)            # a pot on it
+        if dq < d: d = dq; m = M_METAL
+        dq = bx(xm, yl, e, 2.95, 3.65, 0.0, 0.9, 4.2, 5.1)              # boxes
+        if dq < d: d = dq; m = M_PLY
+        for i in range(2):                                             # water
+            dq = max(math.sqrt((xm - 1.95 - 0.34 * i) ** 2 + (e - 1.85) ** 2) - 0.135, abs(yl - 0.24) - 0.23)
+            if dq < d: d = dq; m = M_JUG
+        # someone standing at the front of the room, back to the cab
+        hx = 2.95; hz = 0.80
+        qy = yl - min(max(yl, 0.2), 1.28)
+        dq = math.sqrt((xm - hx) ** 2 * 0.7 + qy * qy + (e - hz) ** 2 * 1.6) - 0.165
+        if dq < d: d = dq; m = M_CLOTH + 300
+        dq = math.sqrt((xm - hx) ** 2 + (yl - 1.50) ** 2 + (e - hz) ** 2) - 0.105
+        if dq < d: d = dq; m = M_HAIR
+        dq = math.sqrt((xm - BLX) ** 2 + (yl - BLY) ** 2 + (e - BLE) ** 2) - 0.05
+        if dq < d: d = dq; m = M_BULB
+    # the hoist mast, left standing
+    if w > -0.2 and abs(x - MASTX) < 1.6 and y < MASTH + 1.0:
+        mx = x - MASTX; mz = w - 0.62
+        yy = y - 1.5 * math.floor(y / 1.5)
+        dq = math.sqrt((abs(mx) - 0.3) ** 2 + (abs(mz) - 0.3) ** 2) - 0.032
+        ring = abs(max(abs(mx), abs(mz)) - 0.3)
+        dq = min(dq, max(math.sqrt(ring * ring + min(yy, 1.5 - yy) ** 2) - 0.02, max(abs(mx), abs(mz)) - 0.33))
+        tri = abs(yy / 0.75 - 1.0)                                      # the lacing
+        if abs(mz) > abs(mx):
+            a = mx; s2 = abs(mz) - 0.3
+        else:
+            a = mz; s2 = abs(mx) - 0.3
+        q = (a - (-0.3 + 0.6 * tri)) * 0.78
+        dq = min(dq, max(math.sqrt(q * q + s2 * s2) - 0.018, abs(a) - 0.3))
+        dq = max(dq, y - MASTH)
+        y6 = y - 6.0 * math.floor(y / 6.0) - 2.6                        # ties back to the slab
+        dq = min(dq, max(max(math.sqrt((abs(mx) - 0.3) ** 2 + y6 * y6) - 0.03, abs(w - 0.15) - 0.17), y - MASTH))
+        if dq < d: d = dq; m = M_MAST
+    return d, m
+
+
+@njit(**NJ)
+def fnormal(x, y, w):
+    e = 0.003
+    a, m = frame_sdf(x + e, y - e, w - e)
+    b, m = frame_sdf(x - e, y - e, w + e)
+    c, m = frame_sdf(x - e, y + e, w - e)
+    d, m = frame_sdf(x + e, y + e, w + e)
+    nx = a - b - c + d; ny = -a - b + c + d; nz = -a + b - c + d
+    q = 1.0 / math.sqrt(nx * nx + ny * ny + nz * nz + 1e-18)
+    return nx * q, ny * q, nz * q
+
+
+@njit(**NJ)
+def fmarch(x, y, w, dx, dy, dw, tmax, eps):
+    """does the ray get out?  1 if it does."""
+    t = 0.03
+    for _ in range(64):
+        d, m = frame_sdf(x + dx * t, y + dy * t, w + dw * t)
+        if d < eps:
+            if m == M_TARP or m % 100 == M_CLOTH or m == M_NET:
+                t += 0.06; continue
+            return 0.0
+        t += max(d, 0.02)
+        if t >= tmax:
+            return 1.0
+    return 1.0
+
+
+@njit(**NJ)
+def fshadow(x, y, w, dx, dy, dw, tmax):
+    t = 0.03; res = 1.0; thru = 1.0
+    for _ in range(90):
+        d, m = frame_sdf(x + dx * t, y + dy * t, w + dw * t)
+        if d < 0.002:
+            if m == M_BULB:
+                return res * thru
+            if m == M_TARP:
+                thru *= 0.45; t += 0.05; continue
+            if m % 100 == M_CLOTH:
+                thru *= 0.25; t += 0.07; continue
+            return 0.0
+        res = min(res, 22.0 * d / t)
+        t += max(d, 0.012)
+        if t >= tmax:
+            break
+    return max(res, 0.0) * thru
+
+
+@njit(**NJ)
+def sky_rad(dx, dy, dz):
+    """the sky forty minutes before the sun: by direction.  Below the level, the fog and what is under it."""
+    if dy > 0.0:
+        k = math.exp(-dy * 7.0)
+        r = 0.0055 + 0.030 * k; g = 0.0105 + 0.041 * k; b = 0.030 + 0.058 * k
+        c = dx * GLOWX + dz * GLOWZ
+        if c > 0.0:
+            q = c * c * c * math.exp(-dy * 10.0)
+            r += 0.120 * q; g += 0.062 * q; b += 0.026 * q
+        return r, g, b
+    return 0.060, 0.040, 0.030
+
+
+@njit(**NJ)
+def frame_albedo(m, x, y, w, nx, ny, nw):
+    k = m // 100; m = m % 100
+    zz = -w
+    if m == M_CONC:
+        # board-marked concrete: the joints of the formwork, tie holes, what the rain has done since
+        u = x if abs(nw) > 0.5 else (zz if abs(nx) > 0.5 else x)
+        v = y if abs(ny) < 0.5 else zz
+        q = 0.70 + 0.34 * fbm2(u * 0.8 + 3.0, v * 0.8, 4) + 0.22 * fbm2(u * 0.09, v * 0.07 + 9.0, 3)
+        if (u % 1.22) < 0.012 or (v % 0.61) < 0.008:
+            q *= 0.80
+        hx = (u % 0.61) - 0.305; hy = (v % 0.61) - 0.305
+        if hx * hx + hy * hy < 0.0005:
+            q *= 0.55
+        yl = y % FH3
+        if abs(ny) < 0.5:
+            run = sstep(0.45, 0.75, fbm2(u * 6.0, math.floor(y / FH3) * 3.7, 2))
+            q *= 1.0 - 0.40 * run * sstep(1.6, 0.0, FH3 - yl)
+            q *= 1.0 - 0.25 * sstep(0.35, 0.0, yl) * fbm2(u * 2.0, 1.0, 2)
+            g2 = fbm2(u * 0.5 + 40.0, v * 0.16, 3)
+            if g2 > 0.62:                                # where the green has taken
+                return 0.30 * q, 0.33 * q, 0.26 * q
+        return 0.36 * q, 0.355 * q, 0.34 * q
+    if m == M_BLOCK:
+        u = x if abs(nw) > 0.5 else zz
+        row = math.floor(y / 0.25)
+        q = 0.82 + 0.22 * hf(int(row), int((u + 0.3 * (row % 2)) / 0.6), 5, 9) + 0.2 * fbm2(u * 1.5, y * 1.5, 3)
+        if (y % 0.25) < 0.014 or ((u + 0.3 * (row % 2)) % 0.6) < 0.014:
+            q *= 0.72
+        q *= 1.0 - 0.3 * sstep(0.5, 0.8, fbm2(u * 5.0, math.floor(y / FH3) * 1.7, 2))
+        return 0.50 * q, 0.50 * q, 0.49 * q
+    if m == M_PLY:
+        q = 0.8 + 0.4 * noise2(x * 3.0, y * 9.0)
+        return 0.34 * q, 0.24 * q, 0.14 * q
+    if m == M_METAL:
+        return 0.30, 0.30, 0.31
+    if m == M_REBAR:
+        return 0.20, 0.11, 0.07
+    if m == M_MAST:
+        q = 0.7 + 0.6 * noise2(x * 5.0 + w * 3.0, y * 0.7)
+        return 0.48 * q, 0.40 * q, 0.13 * q
+    if m == M_CLOTH:
+        q = 0.62 + 0.30 * math.sin(x * 46.0 + 5.0 * noise2(x * 3.0, y * 2.0)) + 0.25 * noise2(x * 9.0 + k, y * 6.0)
+        return CLOTH[k - 1, 0] * q, CLOTH[k - 1, 1] * q, CLOTH[k - 1, 2] * q
+    if m == M_TARP:
+        q = 0.75 + 0.25 * math.sin(y * 9.0 + 3.0 * noise2(x * 2.0, y * 2.0))
+        if (x * 0.9 + y * 0.2) % 0.5 < 0.25:
+            return 0.70 * q, 0.72 * q, 0.74 * q
+        return 0.16 * q, 0.34 * q, 0.62 * q
+    if m == M_NET:
+        q = 0.6 + 0.6 * fbm2(x * 2.0, y * 2.0, 3)
+        return 0.09 * q, 0.19 * q, 0.13 * q
+    if m == M_JUG:
+        return 0.20, 0.42, 0.66
+    if m == M_HAIR:
+        return 0.03, 0.025, 0.02
+    return 0.4, 0.4, 0.4
+
+
+@njit(**NJ)
+def trace_frame(ox, oy, oz, dx, dy, dz, s, NA):
+    """one ray against block 11.  (t, r, g, b, state); t < 0 is a miss."""
+    rx = ox - FCX; rz = oz - FCZ
+    X0 = FCY * rx - FSY * rz + 0.5 * FW; W0 = FSY * rx + FCY * rz - 0.5 * FD; Y0 = oy - FBASE
+    dX = FCY * dx - FSY * dz; dW = FSY * dx + FCY * dz; dY = dy
+    t0, a = ray_box(X0, Y0, W0, dX, dY, dW, -1.6, FW + 1.6, -1.0, HT + 1.6, -FD - 1.6, 1.6)
+    if t0 > 1e29:
+        return -1.0, 0.0, 0.0, 0.0, s
+    t = t0; hm = 0
+    for _ in range(400):
+        d, m = frame_sdf(X0 + dX * t, Y0 + dY * t, W0 + dW * t)
+        if d < 0.002 + 0.00003 * t:
+            hm = m; break
+        t += d
+        if t > t0 + 90.0:
+            break
+    if hm == 0:
+        return -1.0, 0.0, 0.0, 0.0, s
+    x = X0 + dX * t; y = Y0 + dY * t; w = W0 + dW * t
+    if hm == M_BULB:
+        return t, 60.0, 34.0, 13.0, s
+    nx, ny, nw = fnormal(x, y, w)
+    ar, ag, ab = frame_albedo(hm, x, y, w, nx, ny, nw)
+    px = x + nx * 0.012; py = y + ny * 0.012; pw = w + nw * 0.012
+    # what is left of the day, gathered over the half-sphere this point faces
+    Er = 0.0; Eg = 0.0; Eb = 0.0
+    if abs(ny) < 0.9:
+        tx = -nw; ty = 0.0; tz = nx
+        q = 1.0 / math.sqrt(tx * tx + tz * tz); tx *= q; tz *= q
+    else:
+        tx = 1.0; ty = 0.0; tz = 0.0
+    bxx = ny * tz - nw * ty; byy = nw * tx - nx * tz; bzz = nx * ty - ny * tx
+    for i in range(NA):
+        s, r1 = lcg(s); s, r2 = lcg(s)
+        r1 = (i + r1) / NA
+        sr = math.sqrt(r1); ph = 2.0 * math.pi * r2
+        a = sr * math.cos(ph); b = sr * math.sin(ph); c = math.sqrt(max(0.0, 1.0 - r1))
+        lx = a * tx + b * bxx + c * nx; ly = a * ty + b * byy + c * ny; lw = a * tz + b * bzz + c * nw
+        if fmarch(px, py, pw, lx, ly, lw, 18.0, 0.004) > 0.5:
+            wx = FCY * lx + FSY * lw; wz = -FSY * lx + FCY * lw
+            r, g, b2 = sky_rad(wx, ly, wz)
+            Er += r; Eg += g; Eb += b2
+    q = math.pi / NA
+    Er = Er * q + 0.0016; Eg = Eg * q + 0.0018; Eb = Eb * q + 0.0024
+    # the bulb
+    bid, typ, x0, bw, mir, fl = bay_of(min(max(x, 0.001), FW - 0.001), FW)
+    lxw = 9.3 + 3.9 - BLX; lyw = (LIT_F - 1) * FH3 + BLY; lww = -BLE
+    vx = lxw - px; vy = lyw - py; vw = lww - pw
+    d2 = vx * vx + vy * vy + vw * vw
+    if d2 < 600.0:
+        d = math.sqrt(d2)
+        c = (vx * nx + vy * ny + vw * nw) / d
+        mm = hm % 100
+        if mm == M_CLOTH or mm == M_TARP:
+            c = (0.15 + 0.6 * c) if c > 0.0 else (0.55 if mm == M_TARP else 0.25)
+        if c > 0.0:
+            sh = fshadow(px, py, pw, vx / d, vy / d, vw / d, d - 0.06)
+            if sh > 0.0:
+                k = BULB_I * c * sh / (d2 + 0.02)
+                Er += 1.0 * k; Eg += 0.58 * k; Eb += 0.24 * k
+        # once round the room: the walls give some of it back
+        if d2 < 40.0 and x > 9.41 and x < 13.09 and y > (LIT_F - 1) * FH3 and y < LIT_F * FH3 - 0.1 and w < -1.3 and w > -5.3:
+            k = BULB_I * 0.022
+            Er += 1.0 * k; Eg += 0.52 * k; Eb += 0.20 * k
+    return t, ar * Er / math.pi, ag * Eg / math.pi, ab * Eb / math.pi, s
+
+
+# ------------------------------------------------------------------ a tower crane
+@njit(**NJ)
+def sd_cap(x, y, z, ax, ay, az, bx_, by, bz, r):
+    px = x - ax; py = y - ay; pz = z - az
+    ex = bx_ - ax; ey = by - ay; ez = bz - az
+    h = (px * ex + py * ey + pz * ez) / (ex * ex + ey * ey + ez * ez)
+    h = 0.0 if h < 0.0 else (1.0 if h > 1.0 else h)
+    qx = px - ex * h; qy = py - ey * h; qz = pz - ez * h
+    return math.sqrt(qx * qx + qy * qy + qz * qz) - r
+
+
+@njit(**NJ)
+def crane_sdf(x, y, z):
+    """a flat-top tower crane in its own frame: mast on the y axis, jib along +x.  (distance, material)."""
+    d = 1e9; m = M_MAST
+    y0 = CRH + 1.4
+    # the mast
+    if y < CRH + 0.2:
+        if max(abs(x), abs(z)) > 2.2:
+            d = max(abs(x), abs(z)) - 1.2
+        else:
+            yy = y - 2.5 * math.floor(y / 2.5)
+            dq = math.sqrt((abs(x) - 1.0) ** 2 + (abs(z) - 1.0) ** 2) - 0.085
+            ring = abs(max(abs(x), abs(z)) - 1.0)
+            dq = min(dq, max(math.sqrt(ring * ring + min(yy, 2.5 - yy) ** 2) - 0.045, max(abs(x), abs(z)) - 1.06))
+            tri = abs(yy / 1.25 - 1.0)
+            if abs(z) > abs(x):
+                a = x; s2 = abs(z) - 1.0
+            else:
+                a = z; s2 = abs(x) - 1.0
+            q = (a - (-1.0 + 2.0 * tri)) * 0.53
+            dq = min(dq, max(math.sqrt(q * q + s2 * s2) - 0.04, abs(a) - 1.0))
+            d = max(dq, CRB - y)
+    # slewing ring and cab
+    dq = sd_box(x, y - CRH - 0.75, z, 1.35, 0.65, 1.35)
+    if dq < d: d = dq
+    dq = sd_box(x - 1.9, y - CRH - 0.2, z - 2.0, 1.0, 1.05, 0.8)
+    if dq < d: d = dq; m = M_CAB
+    # the jib: two chords below, one above, laced
+    if x > 0.5 and x < JIBL + 1.0 and abs(z) < 2.5 and y > y0 - 2.0 and y < y0 + 3.0:
+        dq = math.sqrt((abs(z) - 0.6) ** 2 + (y - y0) ** 2) - 0.07
+        dq = min(dq, math.sqrt(z * z + (y - y0 - 1.2) ** 2) - 0.08)
+        Ls = 1.3416
+        rr = ((0.6 - abs(z)) * 0.6 + (y - y0) * 1.2) / Ls
+        s2 = ((abs(z) - 0.6) * 1.2 + (y - y0) * 0.6) / Ls
+        xa = x / 2.4; tri = abs(2.0 * (xa - math.floor(xa)) - 1.0)
+        q = (rr - Ls * tri) * 0.73
+        dq = min(dq, max(math.sqrt(q * q + s2 * s2) - 0.035, abs(rr - 0.5 * Ls) - 0.5 * Ls))
+        xb = x - 2.4 * math.floor(x / 2.4 + 0.5)
+        dq = min(dq, max(math.sqrt(xb * xb + (y - y0) ** 2) - 0.03, abs(z) - 0.6))
+        dq = max(dq, x - JIBL); dq = max(dq, 1.0 - x)
+        if dq < d: d = dq; m = M_MAST
+        # trolley, rope, block
+        dq = sd_box(x - TROL, y - y0 + 0.38, z, 0.9, 0.22, 0.78)
+        if dq < d: d = dq; m = M_CAB
+    else:
+        d = min(d, sd_box(x - 0.5 * JIBL - 0.75, y - y0 - 0.5, z, 0.5 * JIBL + 0.25, 2.5, 2.5) + 0.4)
+    if abs(x - TROL) < 1.5 and abs(z) < 1.5 and y < y0:
+        dq = max(math.sqrt((x - TROL) ** 2 + (abs(z) - 0.25) ** 2) - 0.02, HOOKY - y)
+        dq = min(dq, sd_box(x - TROL, y - HOOKY, z, 0.2, 0.45, 0.32))
+        if dq < d: d = dq; m = M_CAB
+    else:
+        d = min(d, max(math.sqrt((x - TROL) ** 2 + z * z) - 1.0, max(y - y0, HOOKY - 1.0 - y)))
+    # the counter-jib and its ballast
+    if x < 0.0:
+        dq = sd_box(x + 0.5 * CJIB, y - y0 - 0.05, z, 0.5 * CJIB, 0.16, 0.75)
+        dq = min(dq, sd_box(x + CJIB - 2.0, y - y0 - 1.25, z, 1.5, 1.1, 0.95))
+        dq = min(dq, max(math.sqrt((y - y0 - 1.15) ** 2 + (abs(z) - 0.75) ** 2) - 0.025, sd_box2(x + 0.5 * CJIB, 0.0, 0.5 * CJIB, 1.0)))
+        if dq < d: d = dq; m = M_MAST
+    # the head, and the ties down to both arms
+    ay = y0 + 7.2
+    dq = sd_cap(x, y, abs(z), 1.3, y0 + 1.2, 0.5, -0.3, ay, 0.0, 0.10)
+    dq = min(dq, sd_cap(x, y, abs(z), -1.6, y0 + 0.2, 0.5, -0.3, ay, 0.0, 0.10))
+    dq = min(dq, sd_cap(x, y, z, -0.3, ay, 0.0, 0.36 * JIBL, y0 + 1.2, 0.0, 0.035))
+    dq = min(dq, sd_cap(x, y, z, -0.3, ay, 0.0, 0.74 * JIBL, y0 + 1.2, 0.0, 0.035))
+    dq = min(dq, sd_cap(x, y, z, -0.3, ay, 0.0, -CJIB + 1.0, y0 + 0.3, 0.0, 0.035))
+    if dq < d: d = dq; m = M_MAST
+    # the lamp at the end of the jib
+    dq = math.sqrt((x - JIBL - 0.15) ** 2 + (y - y0 - 1.45) ** 2 + z * z) - 0.16
+    if dq < d: d = dq; m = M_RED
+    return d, m
+
+
+@njit(**NJ)
+def trace_crane(ox, oy, oz, dx, dy, dz):
+    """(t, r, g, b); t < 0 is a miss."""
+    rx = ox - CRX; rz = oz - CRZ
+    X0 = CRC * rx - CRS * rz; Z0 = CRS * rx + CRC * rz
+    dX = CRC * dx - CRS * dz; dZ = CRS * dx + CRC * dz
+    t0, a = ray_box(X0, oy, Z0, dX, dy, dZ, -CJIB - 1.5, JIBL + 1.5, min(CRB, HOOKY - 1.0), CRH + 10.5, -3.2, 3.2)
+    if t0 > 1e29:
+        return -1.0, 0.0, 0.0, 0.0
+    t = t0; hm = 0
+    eps = 0.003 + 0.00022 * t0
+    for _ in range(260):
+        d, m = crane_sdf(X0 + dX * t, oy + dy * t, Z0 + dZ * t)
+        if d < eps:
+            hm = m; break
+        t += d
+        if t > t0 + JIBL + CJIB + 30.0:
+            break
+    if hm == 0:
+        return -1.0, 0.0, 0.0, 0.0
+    if hm == M_RED:
+        return t, 46.0, 2.6, 0.7
+    x = X0 + dX * t; y = oy + dy * t; z = Z0 + dZ * t
+    e = 0.004 + 0.0002 * t
+    a1, m = crane_sdf(x + e, y - e, z - e); b1, m = crane_sdf(x - e, y - e, z + e)
+    c1, m = crane_sdf(x - e, y + e, z - e); d1, m = crane_sdf(x + e, y + e, z + e)
+    nx = a1 - b1 - c1 + d1; ny = -a1 - b1 + c1 + d1; nz = -a1 + b1 - c1 + d1
+    q = 1.0 / math.sqrt(nx * nx + ny * ny + nz * nz + 1e-18); nx *= q; ny *= q; nz *= q
+    wx = CRC * nx + CRS * nz; wz = -CRS * nx + CRC * nz
+    ur, ug, ub = sky_rad(0.3 * wx, 0.6 + 0.4 * ny, 0.3 * wz)
+    lr, lg, lb = sky_rad(wx, -0.5, wz)
+    ku = (0.5 + 0.5 * ny) * 2.2; kl = (0.5 - 0.5 * ny) * 2.2 + 0.4
+    Er = ur * ku + lr * kl; Eg = ug * ku + lg * kl; Eb = ub * ku + lb * kl
+    # the lamp on the steel near it
+    vx = JIBL + 0.15 - x; vy = CRH + 2.85 - y; vz = -z
+    d2 = vx * vx + vy * vy + vz * vz
+    k = 3.0 * (0.3 + 0.7 * max(0.0, (vx * nx + vy * ny + vz * nz) / math.sqrt(d2 + 1e-9))) / (d2 + 0.05)
+    Er += 1.0 * k; Eg += 0.06 * k; Eb += 0.02 * k
+    ar = 0.20; ag = 0.165; ab = 0.075
+    if hm == M_CAB:
+        ar = 0.20; ag = 0.20; ab = 0.21
+    return t, ar * Er / math.pi, ag * Eg / math.pi, ab * Eb / math.pi
+
+
+# ------------------------------------------------------------------ the fog
+@njit(**NJ)
+def noise3(x, y, z):
+    xi = math.floor(x); yi = math.floor(y); zi = math.floor(z)
+    fx = x - xi; fy = y - yi; fz = z - zi
+    fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy); fz = fz * fz * (3 - 2 * fz)
+    i = int(xi); j = int(yi); k = int(zi)
+    a = hf(i, j, k, 3); b = hf(i + 1, j, k, 3); c = hf(i, j + 1, k, 3); d = hf(i + 1, j + 1, k, 3)
+    e = hf(i, j, k + 1, 3); f = hf(i + 1, j, k + 1, 3); g = hf(i, j + 1, k + 1, 3); h = hf(i + 1, j + 1, k + 1, 3)
+    lo = a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy
+    hi_ = e + (f - e) * fx + (g - e) * fy + (e - f - g + h) * fx * fy
+    return lo + (hi_ - lo) * fz
+
+
+@njit(**NJ)
+def map2(M, x, z):
+    """the fog top (channel 0) and the light under it (1..3), from the survey grid."""
+    gx = (x - MX0) / MCELL; gz = (z - MZ0) / MCELL
+    nz, nx = M.shape[0], M.shape[1]
+    if gx < 0.0: gx = 0.0
+    if gz < 0.0: gz = 0.0
+    if gx > nx - 1.001: gx = nx - 1.001
+    if gz > nz - 1.001: gz = nz - 1.001
+    i = int(gx); j = int(gz); fx = gx - i; fz = gz - j
+    w00 = (1 - fx) * (1 - fz); w10 = fx * (1 - fz); w01 = (1 - fx) * fz; w11 = fx * fz
+    a = M[j, i, 0] * w00 + M[j, i + 1, 0] * w10 + M[j + 1, i, 0] * w01 + M[j + 1, i + 1, 0] * w11
+    b = M[j, i, 1] * w00 + M[j, i + 1, 1] * w10 + M[j + 1, i, 1] * w01 + M[j + 1, i + 1, 1] * w11
+    c = M[j, i, 2] * w00 + M[j, i + 1, 2] * w10 + M[j + 1, i, 2] * w01 + M[j + 1, i + 1, 2] * w11
+    d = M[j, i, 3] * w00 + M[j, i + 1, 3] * w10 + M[j + 1, i, 3] * w01 + M[j + 1, i + 1, 3] * w11
+    e = (M[j, i, 4] * w00 + M[j, i + 1, 4] * w10 + M[j + 1, i, 4] * w01 + M[j + 1, i + 1, 4] * w11
+         + 0.35 * (M[j, i, 5] * w00 + M[j, i + 1, 5] * w10 + M[j + 1, i, 5] * w01 + M[j + 1, i + 1, 5] * w11))
+    return a, b, c, d, e
+
+
+@njit(**NJ)
+def fog_march(M, ox, oy, oz, dx, dy, dz, tmax, s):
+    """through the air to tmax.  Above the fog a thin haze; in it, the light from the sky coming down
+    and the light from the streets coming up.  Returns what the air adds and what it lets through."""
+    T = 1.0; sr = 0.0; sg = 0.0; sb = 0.0
+    # haze above, in one piece
+    tin = 0.0
+    if dy < -1e-6:
+        tin = (FOGMAX - oy) / dy
+    else:
+        tin = 1e30
+    th = min(tmax, tin)
+    if th > 0.0:
+        ym = oy + dy * 0.5 * th
+        tau = HAZE * math.exp(-max(ym - FOGMAX, 0.0) / 300.0) * min(th, 30000.0)
+        a = 1.0 - math.exp(-tau)
+        hr, hg, hb = sky_rad(dx * 0.98, 0.03 + 0.0 * dy, dz * 0.98)
+        sr += a * hr * 0.9; sg += a * hg * 0.9; sb += a * hb * 0.9
+        T *= 1.0 - a
+    if tin >= tmax:
+        return sr, sg, sb, T
+    t = tin
+    s, r1 = lcg(s)
+    ds = 1.0 + 0.010 * t
+    t += ds * r1
+    inside = False
+    for _ in range(400):
+        if t >= tmax or T < 0.004:
+            break
+        x = ox + dx * t; y = oy + dy * t; z = oz + dz * t
+        top, gr, gg, gb, cv = map2(M, x, z)
+        far = sstep(250.0, 900.0, t); q0 = 0.0
+        if far < 1.0:
+            q0 = (1.0 - far) * (4.2 * (noise3(x * 0.055, y * 0.09, z * 0.055) - 0.5) + 1.6 * (noise3(x * 0.19, y * 0.25, z * 0.19) - 0.5))
+            top += q0
+        dep = top - y
+        if dep > -FOGSOFT:
+            den = FOGDEN * sstep(-FOGSOFT, FOGSOFT, dep)
+            step = ds
+            a = 1.0 - math.exp(-den * step)
+            # from above: what the sky gives, less with depth; a little more on the side toward the dawn
+            dd = max(dep, 0.0)
+            if far < 1.0:
+                tx, q1, q2, q3, q4 = map2(M, x + 6.0 * GLOWX, z + 6.0 * GLOWZ)
+                slope = (tx - (top - q0)) / 6.0
+            else:
+                slope = 0.0
+            k = math.exp(-dd * FOGDEN * 0.55) * (1.0 - 3.2 * max(-0.22, min(0.22, slope))) * max(0.30, min(1.9, 1.0 + 0.24 * cv))
+            jr = FSKY[0] * k; jg = FSKY[1] * k; jb = FSKY[2] * k
+            # from below: the streets
+            k = (0.28 + 0.72 * min(1.0, dd / 45.0)) * math.exp(-max(top - FOGTOP + 7.0, 0.0) * 0.05) * max(0.45, min(2.2, 1.0 - 0.22 * cv))   # less where the fog is piled high
+            jr += gr * k; jg += gg * k; jb += gb * k
+            sr += T * a * jr; sg += T * a * jg; sb += T * a * jb
+            T *= 1.0 - a
+            inside = True
+            ds = 1.0 + 0.010 * t
+        else:
+            ds = max(1.5 + 0.012 * t, 0.45 * (-dep - FOGSOFT))
+            if y < FOGMIN - 30.0:
+                break
+        t += ds
+    return sr, sg, sb, T
+
+
+@njit(**NJ)
+def ridge(az):
+    return 0.012 + 0.030 * fbm2(az * 5.0 + 3.0, 1.7, 4) + 0.024 * fbm2(az * 1.3 + 9.0, 4.2, 2)
+
+
+@njit(parallel=True, **NJ)
+def expose(M, UG, CW, CH, OX, OY, F, cxp, cyp, SS, NA, seed, camx, camy, camz):
+    A = np.zeros((CH, CW, 3), np.float32)       # what arrives straight
+    B = np.zeros((CH, CW, 3), np.float32)       # what the fog has turned aside on the way: to be spread
+    nb = BT.shape[0]
+    for iy in prange(CH):
+        py = iy + OY
+        s = (seed * 7919 + py * 104729 + 13) & 0xffffffff
+        for ix in range(CW):
+            px = ix + OX
+            for sy in range(SS):
+                for sx in range(SS):
+                    s, r1 = lcg(s); s, r2 = lcg(s)
+                    x = (px + (sx + r1) / SS - cxp) / F
+                    y = -(py + (sy + r2) / SS - cyp) / F
+                    q = 1.0 / math.sqrt(x * x + y * y + 1.0)
+                    dx = x * q; dy = y * q; dz = -q
+                    tb = 1e30; r = 0.0; g = 0.0; b = 0.0
+                    t, r1_, g1, b1, s = trace_frame(camx, camy, camz, dx, dy, dz, s, NA)
+                    if t > 0.0:
+                        tb = t; r = r1_; g = g1; b = b1
+                    xr = dx / (-dz)
+                    for j in range(nb):
+                        if xr < BTA[j, 0] or xr > BTA[j, 1]:
+                            continue
+                        t, r1_, g1, b1, s = trace_tower(camx, camy, camz, dx, dy, dz, BT[j, 0], BT[j, 1], BTC[j], BTS[j],
+                                                        BT[j, 3], BT[j, 4], int(BT[j, 5]), int(BT[j, 6]), BT[j, 7], UG[j, 0], UG[j, 1], UG[j, 2], s)
+                        if t > 0.0 and t < tb:
+                            tb = t; r = r1_; g = g1; b = b1
+                    t, r1_, g1, b1 = trace_crane(camx, camy, camz, dx, dy, dz)
+                    if t > 0.0 and t < tb:
+                        tb = t; r = r1_; g = g1; b = b1
+                    if tb > 1e29:
+                        r, g, b = sky_rad(dx, dy, dz)
+                        az = math.atan2(dx, -dz)
+                        el = dy / math.sqrt(dx * dx + dz * dz)
+                        rg = ridge(az); rg2 = 0.6 * ridge(az * 1.7 + 4.0) - 0.004
+                        if el < rg2:                     # the near hills on the far bank, and what is lit on them
+                            k = sstep(rg2, rg2 - 0.02, el)
+                            q2 = 0.50 + 0.10 * fbm2(az * 60.0, el * 200.0, 3)
+                            r = r * (1.0 - q2) + 0.011 * q2; g = g * (1.0 - q2) + 0.016 * q2; b = b * (1.0 - q2) + 0.030 * q2
+                            ci = int(az * 11000.0); cj = int(el * 11000.0)
+                            if hf(ci, cj, 5, 1) < 0.03 * k * sstep(0.35, 0.7, fbm2(az * 25.0, el * 60.0, 2)):
+                                q2 = 1.0 + 4.0 * hf(ci, cj, 6, 1) ** 2
+                                r += 1.0 * q2 * 0.05; g += 0.62 * q2 * 0.05; b += 0.30 * q2 * 0.05
+                        elif el < rg:                    # the higher ones behind
+                            q2 = 0.24 + 0.05 * fbm2(az * 40.0, el * 150.0, 3)
+                            r = r * (1.0 - q2) + 0.012 * q2; g = g * (1.0 - q2) + 0.018 * q2; b = b * (1.0 - q2) + 0.034 * q2
+                    fr, fg, fb, T = fog_march(M, camx, camy, camz, dx, dy, dz, tb, s)
+                    s, r1 = lcg(s)
+                    A[iy, ix, 0] += fr + T * r; A[iy, ix, 1] += fg + T * g; A[iy, ix, 2] += fb + T * b
+                    if tb < 1e29:
+                        k = (T ** 0.35) * (1.0 - T ** 0.65) * 0.8
+                        B[iy, ix, 0] += k * r; B[iy, ix, 1] += k * g; B[iy, ix, 2] += k * b
+    n = SS * SS
+    return A / n, B / n
+
+
+def survey(rng):
+    """the fog top and the light under it, on a 2 m grid: the top as a slow sea with smaller water on it;
+    the light as streets, the blocks standing in it, and the river where there is none."""
+    nx = int((MX1 - MX0) / MCELL) + 1; nz = int((MZ1 - MZ0) / MCELL) + 1
+    xs = MX0 + MCELL * np.arange(nx); zs = MZ0 + MCELL * np.arange(nz)
+    X, Z = np.meshgrid(xs, zs)
+    def field(sig):
+        f = gaussian_filter(rng.standard_normal((nz, nx)).astype(np.float32), sig / MCELL, mode='wrap')
+        return f / f.std()
+    # round on top and creased between, as the top of fog is: each size of swell folded about its middle
+    top = FOGTOP + 3.5 * field(300.0) + 4.6 * (0.8 - np.abs(field(75.0))) + 2.8 * (0.8 - np.abs(field(28.0))) + 1.3 * (0.8 - np.abs(field(10.0)))
+    cz = -1250.0 + 330.0 * np.sin(X / 620.0 + 0.6) + 0.10 * X
+    top -= 5.0 * np.clip(1.0 - np.abs(Z - cz) / 300.0, 0.0, 1.0)                           # lower over the river
+    for j in range(BT.shape[0]):                                                          # and drawn up a little round every shaft
+        if BT[j, 1] > -1500.0:
+            x0 = int((BT[j, 0] - MX0 - 120.0) / MCELL); z0 = int((BT[j, 1] - MZ0 - 120.0) / MCELL); w = int(240.0 / MCELL)
+            if x0 < 0 or z0 < 0 or x0 + w >= nx or z0 + w >= nz: continue
+            sl = (slice(z0, z0 + w), slice(x0, x0 + w))
+            top[sl] += 2.5 * np.exp(-((X[sl] - BT[j, 0]) ** 2 + (Z[sl] - BT[j, 1]) ** 2) / (2 * 30.0 ** 2))
+    curv = top - gaussian_filter(top, 28.0 / MCELL, mode='wrap')
+    curv2 = top - gaussian_filter(top, 110.0 / MCELL, mode='wrap')
+    # streets
+    th = math.radians(24.0)
+    U = X * math.cos(th) + Z * math.sin(th); V = -X * math.sin(th) + Z * math.cos(th)
+    def lines(C, period, width, off):
+        return (np.abs(((C + off) % period) - 0.5 * period) < width).astype(np.float32)
+    g = 1.0 * lines(U, 230.0, 6.0, 40.0) + 1.0 * lines(V, 190.0, 6.0, 90.0) + 2.4 * lines(U, 920.0, 14.0, 300.0) + 2.4 * lines(V, 760.0, 14.0, 120.0)
+    g += 0.035
+    dist = (0.04 + 2.6 * np.clip(0.42 + 0.6 * field(380.0), 0, None) ** 2.4) * (0.55 + 0.45 * np.clip(1.0 + 0.8 * field(110.0), 0, 2))                 # districts, some brighter
+    dist += 0.5 * np.exp(-((X - 60.0) ** 2 + (Z + 300.0) ** 2) / (2 * 250.0 ** 2))          # this side of the river, where the estates are
+    g = g * dist
+    white = np.clip(field(260.0) - 1.1, 0, None) * 0.8                                    # a few places lit white
+    # the river: a wide bend with nothing on it, and one bridge
+    riv = np.clip((np.abs(Z - cz) - 170.0) / 120.0, 0.0, 1.0)
+    g *= 0.04 + 0.96 * riv; white *= riv
+    br = (np.abs(X - 0.35 * Z - 760.0) < 9.0) & (riv < 1.0)
+    g += 2.2 * br
+    # under every block a pool: sodium mostly, a few white, no two the same strength
+    for j in range(BT.shape[0]):
+        sg = 30.0 + 26.0 * rng.random(); amp = 0.5 + 3.4 * rng.random() ** 1.6; wh = rng.random() < 0.2
+        x0 = int((BT[j, 0] - MX0 - 3 * sg) / MCELL); z0 = int((BT[j, 1] - MZ0 - 3 * sg) / MCELL); w = int(6 * sg / MCELL)
+        if x0 < 0 or z0 < 0 or x0 + w >= nx or z0 + w >= nz: continue
+        sl = (slice(z0, z0 + w), slice(x0, x0 + w))
+        blob = amp * np.exp(-((X[sl] - BT[j, 0]) ** 2 + (Z[sl] - BT[j, 1]) ** 2) / (2 * sg ** 2))
+        if wh: white[sl] += 0.8 * blob
+        else: g[sl] += blob
+    col = np.stack([g * 1.00 + white * 1.0, g * 0.50 + white * 0.86, g * 0.17 + white * 0.70], -1) * GLOWK
+    col = np.stack([gaussian_filter(col[..., c], 9.0 / MCELL) * 0.5 + gaussian_filter(col[..., c], 45.0 / MCELL) * 0.5 for c in range(3)], -1)
+    M = np.concatenate([top[..., None], col, curv[..., None], curv2[..., None]], -1).astype(np.float32)
+    return np.ascontiguousarray(M)
+
+
+def develop(lin, scale, rng, exposure):
+    """the air takes a little of every light and spreads it; then the eye; then the paper."""
+    H, W = lin.shape[:2]
+    lin = np.maximum(lin.astype(np.float64), 0.0)
+    g1 = np.stack([gaussian_filter(lin[..., c], 5.0 * scale) for c in range(3)], -1)
+    g2 = np.stack([gaussian_filter(lin[..., c], 24.0 * scale) for c in range(3)], -1)
+    g3 = np.stack([gaussian_filter(lin[..., c], 120.0 * scale) for c in range(3)], -1)
+    lin = 0.92 * lin + 0.04 * g1 + 0.025 * g2 + 0.015 * g3
+    lin = lin * exposure
+    L = 0.2126 * lin[..., 0] + 0.7152 * lin[..., 1] + 0.0722 * lin[..., 2]
+    wp = 7.0
+    f = lambda x: x * (1.0 + x / wp ** 2) / (1.0 + x)
+    y = 0.62 * lin * (f(L) / np.maximum(L, 1e-9))[..., None] + 0.38 * f(lin)
+    y = np.clip(y, 0.0, 1.0)
+    y = np.where(y <= 0.0031308, 12.92 * y, 1.055 * np.power(np.maximum(y, 1e-9), 1 / 2.4) - 0.055)
+    y = y + 0.16 * (y * y * (3 - 2 * y) - y)
+    y = 0.022 + 0.965 * y
+    g = gaussian_filter(rng.standard_normal((H, W)), 0.6 * max(scale, 0.5)); g /= g.std()
+    lum = y.mean(-1, keepdims=True)
+    amp = 0.004 + 0.008 * np.sqrt(np.clip(4 * lum * (1 - lum), 0, 1))
+    y = y + amp * g[..., None]
+    return np.clip(y, 0, 1)
+
+
+def sign(img, scale, floor):
+    """a crane hook, lower right, and the floor the cab was level with."""
+    H, W = img.shape[:2]
+    u = max(scale, 0.2)
+    cw, ch = int(250 * u), int(84 * u)
+    k = 4
+    im = Image.new('L', (cw * k, ch * k), 0); d = ImageDraw.Draw(im)
+    lw = max(int(3.4 * u * k), 2)
+    cx, top = 40 * u * k, 8 * u * k
+    r0 = 5 * u * k
+    d.ellipse([cx - r0, top, cx + r0, top + 2 * r0], outline=255, width=lw)                 # the eye
+    d.line([(cx, top + 2 * r0), (cx, top + 34 * u * k)], fill=255, width=lw)                 # the shank
+    R = 15 * u * k
+    cy = top + 34 * u * k + R * 0.55
+    d.arc([cx - R, cy - R, cx + R, cy + R], start=-55, end=200, fill=255, width=lw)          # the hook
+    font = ImageFont.truetype('/usr/share/fonts/opentype/urw-base35/NimbusSans-Regular.otf', int(38 * u * k))
+    d.text((cx + 34 * u * k, top + 22 * u * k), '%dF' % floor, fill=255, font=font)
+    im = im.resize((cw, ch), Image.LANCZOS)
+    m = np.asarray(im, np.float64) / 255.0
+    x0 = W - cw - int(60 * u); y0 = H - ch - int(56 * u)
+    reg = img[y0:y0 + ch, x0:x0 + cw]
+    out = reg + (0.62 - reg) * 0.55 * m[..., None]
+    img[y0:y0 + ch, x0:x0 + cw] = np.clip(out, 0, 1)
+    return img
+
+
+def main():
+    scale = float(sys.argv[1]) if len(sys.argv) > 1 else 1.0
+    out = sys.argv[2] if len(sys.argv) > 2 else __file__.replace('.py', '.png')
+    W = int(round(PW * scale)); H = int(round(PH * scale))
+    F = FOC * scale
+    SS = 3 if scale >= 0.99 else 2
+    NA = 3 if scale >= 0.99 else 2
+    for a in sys.argv:
+        if a.startswith('--ss='): SS = int(a[5:])
+        if a.startswith('--na='): NA = int(a[5:])
+    rng = np.random.default_rng(SEED)
+    t0 = time.time()
+    M = survey(rng)
+    UG = np.zeros((BT.shape[0], 3))
+    for j in range(BT.shape[0]):
+        a, b, c, d, e = map2(M, BT[j, 0], BT[j, 1])
+        q = min(1.0, 0.20 / max(b, 1e-6))                 # a block is not lit harder than the fog round it is bright
+        UG[j] = (b * q, c * q, d * q)
+    print('surveyed  %.0fs' % (time.time() - t0), flush=True)
+    OX = OY = 0; crop = None; CW, CH = W, H
+    for a in sys.argv:
+        if a.startswith('--crop='):                       # x0,y0,x1,y1 in pixels of the full picture at this scale
+            crop = [int(v) for v in a[7:].split(',')]
+            OX, OY = crop[0], crop[1]; CW = crop[2] - crop[0]; CH = crop[3] - crop[1]
+    A, B = expose(M, UG, CW, CH, OX, OY, F, CXP * scale, CYP * scale, SS, NA, SEED % 9973, CAMX, CAMY, CAMZ)
+    print('exposed  %.0fs' % (time.time() - t0), flush=True)
+    A = A.astype(np.float64); B = B.astype(np.float64)
+    lin = A + np.stack([0.55 * gaussian_filter(B[..., c], 4.0 * scale) + 0.45 * gaussian_filter(B[..., c], 18.0 * scale) for c in range(3)], -1)
+    img = develop(lin, scale, rng, EXPOSURE)
+    if crop is None: img = sign(img, scale, CAM_F)
+    Image.fromarray((img * 255 + rng.random(img.shape)).clip(0, 255).astype(np.uint8)).save(out)
+    print('saved', out, '%dx%d  %.0fs' % (CW, CH, time.time() - t0), flush=True)
+
+
+if __name__ == '__main__':
+    main()

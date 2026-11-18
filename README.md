@@ -2,9 +2,9 @@
 
 A gallery for work that stays with you
 
-Antara is a walkable gallery: you move through a long hall and 6 rooms, one for each artist, and stand in front of 24 pictures, each with a short text, a recording and the program that made it.
+Antara is a walkable gallery: you move through a long hall and 8 rooms, one for each artist, and stand in front of 30 pictures, each with a short text, a recording and the program that made it.
 
-It is entirely imagined. The gallery, its curator, the six artists and their lives, the exhibition texts, the building and every picture were conceived and made by Fable 5.2, an AI model, as an experiment by Shyam Sreevalsan. The artists are fictional. The places and trades they come from are real.
+It is entirely imagined. The gallery, its curator, the eight artists and their lives, the exhibition texts, the building and every picture were conceived and made by Fable 5.2, an AI model, as an experiment by Shyam Sreevalsan. The artists are fictional. The places and trades they come from are real.
 
 Live: **https://shyamvalsan.github.io/antara/**
 
@@ -26,9 +26,15 @@ Every artwork is one self-contained Python program that computes the picture. Th
 | Kund, three thousand five hundred steps, one going down | Ruhi Vaghela | [kund_three_thousand_five_hundred_steps_one_going_down.py](code/ruhi/kund_three_thousand_five_hundred_steps_one_going_down.py) | 935 |
 | Vav, the seventh storey down, noon in May | Ruhi Vaghela | [vav_the_seventh_storey_down_noon_in_may.py](code/ruhi/vav_the_seventh_storey_down_noon_in_may.py) | 1,350 |
 | Kuvo, from the water, looking up | Ruhi Vaghela | [kuvo_from_the_water_looking_up.py](code/ruhi/kuvo_from_the_water_looking_up.py) | 1,424 |
+| Nan'an, 5:40 am, fog to the thirty-first floor | Xiang Wan | [nanan_540am_fog_to_the_thirty_first_floor.py](code/xiangwan/nanan_540am_fog_to_the_thirty_first_floor.py) | 2,111 |
+| Block 6, 7:15 pm, every window | Xiang Wan | [block_6_715pm_every_window.py](code/xiangwan/block_6_715pm_every_window.py) | 1,351 |
+| Block 11, unfinished, one family moved in | Xiang Wan | [block_11_unfinished_one_family_moved_in.py](code/xiangwan/block_11_unfinished_one_family_moved_in.py) | 1,922 |
 | Sala de espera, Aduana, 25:00 | Halina Mróz Quispe | [sala_de_espera_aduana_2500.py](code/halina/sala_de_espera_aduana_2500.py) | 890 |
 | Escalera 3, marea alta | Halina Mróz Quispe | [escalera_3_marea_alta.py](code/halina/escalera_3_marea_alta.py) | 1,213 |
 | Salar, puerta, mediodía | Halina Mróz Quispe | [salar_puerta_mediodia.py](code/halina/salar_puerta_mediodia.py) | 739 |
+| Redwood Mountain, night ignition, lit from under | Ray Avila | [redwood_mountain_night_ignition_lit_from_under.py](code/ray/redwood_mountain_night_ignition_lit_from_under.py) | 1,177 |
+| Giant Forest, 6:50 am, the fire is walking | Ray Avila | [giant_forest_650am_the_fire_is_walking.py](code/ray/giant_forest_650am_the_fire_is_walking.py) | 1,195 |
+| Board Camp, the second winter, snow on the dead | Ray Avila | [board_camp_the_second_winter_snow_on_the_dead.py](code/ray/board_camp_the_second_winter_snow_on_the_dead.py) | 881 |
 | Third Mainland, inbound, 6:40 am, four seconds | Tobi Adeyemi | [third_mainland_inbound_640am_four_seconds.py](code/tobi/third_mainland_inbound_640am_four_seconds.py) | 1,282 |
 | Ojuelegba, 6:42 pm, eleven seconds | Tobi Adeyemi | [ojuelegba_642pm_eleven_seconds.py](code/tobi/ojuelegba_642pm_eleven_seconds.py) | 1,371 |
 | Oshodi under bridge, rain coming, nine seconds | Tobi Adeyemi | [oshodi_under_bridge_rain_coming_nine_seconds.py](code/tobi/oshodi_under_bridge_rain_coming_nine_seconds.py) | 1,494 |

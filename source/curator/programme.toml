@@ -13,7 +13,7 @@ name = "Antara"
 line = "A gallery for work that stays with you"
 season = "Winter programme"
 dates = "12 November 2026 to 28 February 2027"
-description = "Antara is a gallery you walk through. Six solo exhibitions, hung by Leela, with an audio guide to every work."
+description = "Antara is a gallery you walk through. Eight solo exhibitions, hung by Leela, with an audio guide to every work."
 voice = "bf_emma"
 speed = 0.94
 
@@ -35,7 +35,7 @@ said = [
 welcome = '''
 Welcome to Antara. I am Leela, and I hung these rooms.
 
-You are standing in the long gallery. Six exhibitions open off it, three on each side, and each belongs to one maker. Walk wherever you like. When you stop in front of a work, I will tell you a little about it, and then I will stop talking.
+You are standing in the long gallery. Eight exhibitions open off it, four on each side, and each belongs to one maker. Walk wherever you like. When you stop in front of a work, I will tell you a little about it, and then I will stop talking.
 
 I chose these pictures by one test. After you leave, does the picture stay with you? Take your time. Stand further back than you think you should. Then come much closer than is polite.
 '''
@@ -96,7 +96,7 @@ The eleventh of May, 2024, about two in the morning. I was on the hill below the
 I have a rule that I do not paint auroras, because every calendar has one. I broke it once, for the night it came to my own valley. The red is oxygen, very high up. The stars go on shining through it, and the river took the colour and carried it across the valley floor. One window is lit, down by the water. Whoever was awake in there saw it too.
 '''
 
-# ----------------------------------------------------------------- 1, right
+# ------------------------------------------------------------------ 2, right
 [[exhibition]]
 slug = "go-sun-deok"
 folder = "sundeok"
@@ -163,7 +163,7 @@ This is the bottom of a breath. I have turned, and I am looking up at where I ha
 Everything pale here is paper the brush never touched. The last few metres are the longest. The light at the top always looks nearer than it is.
 '''
 
-# ------------------------------------------------------------------ 2, left
+# ------------------------------------------------------------------ 3, left
 [[exhibition]]
 slug = "ruhi-vaghela"
 folder = "ruhi"
@@ -219,7 +219,63 @@ My other two pictures look down into the earth. This one looks up out of it. You
 Ring upon ring of carving, and niches that still hold what is left of their figures. A stair of single stones is built into the wall and winds up in three turns. An hour past noon the sun comes down the mouth and the stone passes the light from one side to the other, all the way to where you are. Now find her. She is on the second turn of the stair, in red, with a brass pot on her head, climbing. She is the size of one bracket. Then look at the sky again, and think how far she has to go.
 '''
 
-# ----------------------------------------------------------------- 2, right
+# ------------------------------------------------------------------ 4, right
+[[exhibition]]
+slug = "xiang-wan"
+folder = "xiangwan"
+artist = "Xiang Wan"
+title = "Every Window"
+origin = "Chongqing, born 1988"
+wall = "#1B2026"
+frame = "#0A0B0D"
+intro = '''
+Xiang Wan drives a tower crane in Chongqing. For sixteen years she has climbed a ladder inside a steel mast, forty minutes up, and sat alone in a glass cab for twelve hours, lifting the city into place one load at a time. She has worked on about forty towers.
+
+From the cab, after dark, she sees what nobody on the ground sees: every window of a whole rank of towers at once. These pictures are that view. Each window you see is a room she has computed separately, with its own lamp, its own curtains, its own washing. In each picture there is one red light. And one window, always the thirteenth floor, fourth from the left, is always lit. She has not told me why.
+'''
+bio = '''
+She was born in a village above the Yangtze at Fengjie. The lower village went under the reservoir when she was fifteen and the family was moved up the hill. She came to Chongqing at seventeen, worked as a signaller, and took the crane at twenty-two. She works nights by choice.
+
+Each picture is one program. A tower is built storey by storey as a solid model, and every flat behind its glass is given a back wall, a lamp and a household by calculation. The fog is computed too, with the light of the rooms spread through it. She began in 2022, on a secondhand laptop, in the hours when the wind was over the limit and the crane was locked off. She signs with a crane hook and the floor she was level with.
+'''
+said = [
+  "People say a city is lights. It is not. It is windows. Somebody chose every one of those lamps.",
+  "I have built nine thousand homes. I know because I counted the slabs.",
+  "From the ground, fog is weather. From the cab, it is a floor, and the city is the people living under it.",
+]
+
+[[exhibition.work]]
+file = "nanan_540am_fog_to_the_thirty_first_floor.png"
+title = "Nan'an, 5:40 am, fog to the thirty-first floor"
+medium = "Measured towers, fog and light computed, matte pigment print"
+story = '''
+Twenty to six in the morning, from the forty-first floor. The fog has come up off the river in the night and stopped at the thirty-first. Everything below that is gone. What is left is the top ten storeys of every tower, standing in it like posts in water, out to the hills.
+
+The fog is not grey. Look where it is orange: there is an estate under that, with its street lamps still on. Where it is blue there is only river. A few kitchens are lit, the people on the early shift. In the middle is a block that was never finished, and my crane beside it, with the red lamp on the end of the jib. From the ground, this is a morning you cannot see across the road. From up here it is the quietest the city ever gets, and I am the only one looking at it.
+'''
+
+[[exhibition.work]]
+file = "block_6_715pm_every_window.png"
+title = "Block 6, 7:15 pm, every window"
+medium = "Measured towers, light computed, matte pigment print"
+hero = true
+story = '''
+One face of one block, thirty-eight storeys, seen square on from the cab of my crane. It is a quarter past seven. People are home. There are about eleven hundred windows in front of you, and behind every one of them I have built a room.
+
+From the door it is a pattern. Now come close and pick one. Somebody chose that lamp, the warm one or the cold white tube. Somebody hung that washing and has not taken it in. There is a television on. There is a kitchen. There is one red paper lantern on a balcony, near the middle. I lifted the concrete for buildings like this for sixteen years, and I never once saw the inside of a flat. So I made the insides myself. You will not get through all of them. I have not.
+'''
+
+[[exhibition.work]]
+file = "block_11_unfinished_one_family_moved_in.png"
+title = "Block 11, unfinished, one family moved in"
+medium = "Measured towers, fog and light computed, matte pigment print"
+story = '''
+This one I worked on. Thirty-three storeys of frame, and then the money stopped. The walls got as far as the fifteenth floor. Above that it is open to the weather. The hoist is still bolted to the side. The green net has been tearing for three winters.
+
+The people who bought these flats had already paid. They are still paying. Some of them had nowhere else to go. So look at the thirteenth floor, on the left. One family moved in. There is no glass, no lift, no water above the ground. They have a bulb on a wire, a tarpaulin, two water jugs, and a line of washing. Someone is standing there with their back to you, looking in. Nearly seven hundred rooms, and that is the only one that is a home. I counted.
+'''
+
+# ------------------------------------------------------------------ 5, left
 [[exhibition]]
 slug = "halina-mroz-quispe"
 folder = "halina"
@@ -275,7 +331,63 @@ A door, standing by itself on the salt flat, at noon. I held the surveyor's staf
 There are several shadows in this picture. Check each one against the sun. Then ask yourself why someone would stand a door where there is no wall, and whether you would open it.
 '''
 
-# ------------------------------------------------------------------ 3, left
+# ------------------------------------------------------------------ 6, right
+[[exhibition]]
+slug = "ray-avila"
+folder = "ray"
+artist = "Ray Avila"
+title = "Good Fire"
+origin = "Tulare County, California, born 1973"
+wall = "#33312E"
+frame = "#14110E"
+intro = '''
+Ray Avila spent twenty-four summers on a hotshot crew in the Sierra Nevada, putting fires out. Now he lights them. He is a burn boss in the giant sequoia groves, where the trees are two thousand years old and have stood through a low fire every ten or fifteen years of that time. They need it. It clears the ground and opens their cones.
+
+For a century those fires were put out, and the ground filled with fuel. In 2020 and 2021, fires went through the groves hotter than anything the trees had met, and nearly a fifth of all the large sequoias on earth died in fourteen months. He was there. These are three pictures of fire: the kind the trees require, by morning and by night, and what the other kind left. There is one firefighter in each, in a yellow shirt. Find the figure, and the trees will get larger.
+'''
+bio = '''
+His father pruned citrus at Woodlake and lit smudge pots in the orange groves on frost nights, so he grew up thinking of a fire as a tool you set down carefully and watch until morning. He joined a hotshot crew at nineteen and was its superintendent when he left. Since 2018 he has planned and lit prescribed burns in the groves, in spring and in October, when the fuel is damp and the wind is right.
+
+Each picture is one program. Every trunk is built as a solid, with its flutes, its buttresses and its fire scars. The smoke is computed along every line of sight, so the shafts of sun and the glow above a flame are true. The only light is the sun or the fire. He began in the winter of 2022. He signs with three rings and the age of the oldest tree in the picture.
+'''
+said = [
+  "Good fire walks. If it runs, you got it wrong, or somebody did a hundred years ago.",
+  "These trees do not survive fire. They require it. We forgot the second half.",
+  "I am not painting a disaster. I am painting maintenance.",
+]
+
+[[exhibition.work]]
+file = "redwood_mountain_night_ignition_lit_from_under.png"
+title = "Redwood Mountain, night ignition, lit from under"
+medium = "Measured grove, smoke and firelight computed, matte pigment print"
+story = '''
+We burn at night when we can. The air is cool and damp, and the fire behaves. There is no other light in this picture. No moon, no stars, no headlamp. Everything you can see, the fire is showing you.
+
+Five strips of flame, one above another up the slope. The farthest was lit first and has nearly burned down. The trunks are orange at the foot and black by the time they leave the picture, and they go on a long way after that. The oldest here is about two thousand four hundred years old. It has been through maybe two hundred fires like this one. Look at the flames. Not one of them is higher than your knee. That is the whole job.
+'''
+
+[[exhibition.work]]
+file = "giant_forest_650am_the_fire_is_walking.png"
+title = "Giant Forest, 6:50 am, the fire is walking"
+medium = "Measured grove, smoke and sunlight computed, matte pigment print"
+hero = true
+story = '''
+Ten to seven on a spring morning, with a burn on the ground since the day before. The sun has just come over the ridge, and the smoke is showing you where the light is. Without smoke you would not see those shafts at all.
+
+The fire is the two thin lines across the middle. It is a hand high. It is moving about as fast as you would walk if you were carrying something full. We say a good fire walks. The tree on the right has a black arch at its foot, where a fire got in through the bark some centuries ago, and the tree grew around it and carried on. Now find the firefighter, in yellow, at the bottom of that tree, with a drip torch. That is how big the tree is. I should tell you this is the most beautiful light I know, and I have never been easy about that.
+'''
+
+[[exhibition.work]]
+file = "board_camp_the_second_winter_snow_on_the_dead.png"
+title = "Board Camp, the second winter, snow on the dead"
+medium = "Measured grove, snow and cloud computed, matte pigment print"
+story = '''
+This is the other kind of fire, two winters after. It came through in one afternoon, in the crowns, a hundred metres up. A sequoia can take almost anything at its foot. It cannot take that.
+
+The big black ones are the giants. There are eighteen in the picture, and the oldest stood for two thousand seven hundred years. The thin ones are everything that grew up around them in the hundred years we kept fire out. That was the fuel. Nothing here is alive. One line of tracks goes up through the snow to somebody in yellow, standing on a fallen tree, looking. It is very quiet in a place like this. You expect wind in the tops, and there are no tops.
+'''
+
+# ------------------------------------------------------------------ 7, left
 [[exhibition]]
 slug = "tobi-adeyemi"
 folder = "tobi"
@@ -331,7 +443,7 @@ Under the flyover at Oshodi, in the white light that comes just before rain. Eve
 Seven looks, in nine seconds. One bus is in the picture twice, at two distances, because I looked at it twice and it had moved.
 '''
 
-# ----------------------------------------------------------------- 3, right
+# ------------------------------------------------------------------ 8, right
 [[exhibition]]
 slug = "ilanji"
 folder = "ilanji"

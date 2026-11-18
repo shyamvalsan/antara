@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Room music for the gallery: one parameterised ambient renderer, seven loops.
+"""Room music for the gallery: one parameterised ambient renderer, nine loops.
 
 Pure synthesis (numpy/scipy). Everything is rendered circularly (notes wrap
 around the loop end, reverb is a circular FFT convolution, filters run on a
@@ -14,7 +14,7 @@ Tonal scheme (so any 3 s crossfade between rooms is consonant)
   * every room carries D and/or A in its drone, so the fifth D-A is the shared
     ground; chord roots only move among D, B, G, A (all diatonic neighbours).
 
-Run: .venv/bin/python ambient.py [slug ...]      (default: all seven)
+Run: .venv/bin/python ambient.py [slug ...]      (default: all nine)
 """
 import subprocess
 import sys
@@ -532,6 +532,78 @@ def room_ilanji(rng):
         master=dict(width=0.55, wobble=0.08, hp=40, lp=2400, dip=-2.0, lev=0.12))
 
 
+def room_xiangwan(rng):
+    """Crane cab above a foggy night city: far-off hum, high air, single windows coming on."""
+    # distant city hum: low D/A, slightly detuned pairs, softly breathing
+    hum = static_pad(rng, [(38, 0.5, -0.25), (45, 0.34, 0.25), (50, 0.2, 0.0), (57, 0.1, -0.2)],
+                     hmax=5, rolloff=1.5, fmax=1200.0, det=(0.0012, 0.0030), lfo_rate=(0.02, 0.06))
+    hum *= (1 + 0.12 * lfo(32, 0.8) + 0.05 * lfo(96, 2.1))[:, None]
+    # high airy shimmer: sines swelling out of silence at different slow periods
+    air = np.zeros((N, 2))
+    for m, per, ph, pan in [(81, 48, 0.6, -0.7), (86, 32, 2.4, 0.75), (88, 96, 4.1, -0.4),
+                            (83, 24, 1.2, 0.5), (93, 48, 5.0, 0.9)]:
+        f = hz(m)
+        g = (0.5 + 0.5 * lfo(per, ph)) ** 4
+        for off in (-0.12, 0.12):
+            s = np.sin(2 * np.pi * snap(f + off) * T + rng.uniform(0, 6.28)) * g
+            air += pan2(s, pan) * 0.5
+    # windows: sparse, soft glass-bell tones on D E G A B, widely spaced and panned
+    win = np.zeros((N, 2))
+    pool = [74, 76, 79, 81, 83, 86, 88]
+    P = [(1.0, 1.0, 3.6), (2.0, 0.22, 2.4), (3.0, 0.07, 1.5), (4.0, 0.03, 1.0)]
+    t, last = 6.0, None
+    while t < DUR - 6:
+        m = int(rng.choice([p for p in pool if p != last]))
+        last = m
+        pan = rng.choice([-1, 1]) * rng.uniform(0.25, 0.9)
+        put(win, voice(hz(m), 12.0, rng, partials=P, attack=0.09, release=1.5,
+                       twin=(0.4, 1.002, 3.0), fmax=3200.0) * rng.uniform(0.4, 0.75), t, pan)
+        t += rng.uniform(7.5, 13.0)
+    win = echo(win, [(1.7, 0.3), (3.1, 0.18)], damp=3000)
+    return dict(
+        layers=[dict(x=hum, dry=.8, wet=.4, lp_dry=900, lp_wet=900),
+                dict(x=air, dry=.10, wet=.6),
+                dict(x=win, dry=.30, wet=1.0, lp_dry=3500)],
+        rev=dict(rt60=7.0, length=9.0, bands=[(60, 400, 1.0), (400, 1500, 1.0), (1500, 4000, 0.8), (4000, 9000, 0.4)]),
+        master=dict(width=1.3, wobble=0.1, hp=40, lp=5000, dip=-3.0, lev=0.25))
+
+
+def room_ray(rng):
+    """Sequoia grove, low fire, morning smoke: huge, still, warm; deep fifths, breathing wood tones."""
+    # deep warm drone: low fifths G/D
+    drone = static_pad(rng, [(31, 0.4, -0.15), (38, 0.55, 0.15), (43, 0.3, 0.0), (50, 0.16, -0.2)],
+                       hmax=6, rolloff=1.3, fmax=1400.0, lfo_rate=(0.015, 0.05))
+    drone *= (1 + 0.10 * lfo(48, 0.3))[:, None]
+    # wood-like breathing tones in the low-mid register: slow swell in and out, odd-leaning harmonics
+    wood = np.zeros((N, 2))
+    for m, per, ph, pan in [(50, 24, 0.0, -0.3), (55, 32, 2.0, 0.3), (59, 48, 4.0, -0.15), (62, 32, 5.2, 0.2)]:
+        f = hz(m)
+        g = (0.5 + 0.5 * lfo(per, ph)) ** 1.5
+        s = np.zeros(N)
+        for h, a in [(1, 1.0), (2, 0.35), (3, 0.28), (5, 0.08)]:
+            for off in (-0.06, 0.06):
+                s += np.sin(2 * np.pi * snap(f * h + off * h) * T + rng.uniform(0, 6.28)) * a * 0.5
+        wood += pan2(s * g, pan) * 0.6
+    # very faint distant fire / wind in high crowns: band-limited noise, slow and seamless
+    nz = circ_filter(np.stack([rng.standard_normal(N), rng.standard_normal(N)], 1),
+                     signal.butter(2, [180, 900], "band", fs=SR, output="sos"))
+    nz *= (0.55 + 0.45 * smooth_noise(N, 0.06, rng))[:, None]
+    # occasional low, round tones
+    low = np.zeros((N, 2))
+    P = [(1.0, 1.0, 8.0), (2.0, 0.25, 5.0), (3.0, 0.06, 3.0)]
+    for i, m in enumerate([43, 50, 47, 38]):
+        t = 10 + i * 22 + rng.uniform(-3, 3)
+        put(low, voice(hz(m), 24.0, rng, partials=P, attack=0.6, release=3.0, twin=(0.3, 1.002, 6.0),
+                       fmax=900.0) * rng.uniform(0.7, 1.0), t, rng.uniform(-0.35, 0.35))
+    return dict(
+        layers=[dict(x=drone, dry=.8, wet=.35, lp_dry=1100, lp_wet=1100),
+                dict(x=wood, dry=.35, wet=.5, lp_dry=1000, lp_wet=1000),
+                dict(x=nz, dry=.045, wet=.06),
+                dict(x=low, dry=.35, wet=.9, lp_dry=900, lp_wet=900)],
+        rev=dict(rt60=6.0, length=8.0, bands=[(50, 400, 1.2), (400, 1500, 1.0), (1500, 4000, 0.35), (4000, 9000, 0.1)]),
+        master=dict(width=0.8, wobble=0.08, hp=35, lp=2200, dip=-1.0, lev=0.15))
+
+
 ROOMS = {   # slug -> (builder, seed)
     "nave": (room_nave, 20261112),
     "stanzin-dolkar": (room_stanzin, 20261201),
@@ -540,6 +612,8 @@ ROOMS = {   # slug -> (builder, seed)
     "halina-mroz-quispe": (room_halina, 20261204),
     "tobi-adeyemi": (room_tobi, 20261205),
     "ilanji": (room_ilanji, 20261206),
+    "xiang-wan": (room_xiangwan, 20261207),
+    "ray-avila": (room_ray, 20261208),
 }
 
 

@@ -28,6 +28,8 @@ VOICES = {
     "Halina Mróz Quispe": "pTX8uGyVgHCWLj6IkcbC",
     "Tobi Adeyemi": "LEvd0YiWkwZ6hTZOmdVE",
     "Ilanji": "ybsn8GUgoNB8oDLyFqwG",
+    "Xiang Wan": "OtI9u7gjScKYR7rOqBX2",
+    "Ray Avila": "AbC8oPOKZtEsnzX1POyd",
 }
 # Direction for the voice: how each speaker talks, and a few lines that get
 # their own tone. Bracketed tags are read by the model as direction, not text.
@@ -39,6 +41,8 @@ BASE = {
     "Halina Mróz Quispe": "[Dry, deadpan, official]",
     "Tobi Adeyemi": "[Quick, warm, confident]",
     "Ilanji": "[Old man, gentle, slow, tender]",
+    "Xiang Wan": "[Plain, quick, dry, quietly amused]",
+    "Ray Avila": "[Slow, level, practical, low]",
 }
 LINES = {
     "I am not going to tell you which.": "[faintly amused]",
@@ -63,12 +67,17 @@ LINES = {
     "I drew a lamp.": "[softly]",
     "Will they leave a grove alone?": "[wondering]",
     "The lamp is still lit.": "[softly]",
+    "I have not.": "[dry, amused]",
+    "I counted.": "[quietly]",
+    "That is the whole job.": "[quietly]",
+    "and there are no tops.": "[very quietly]",
 }
 
 # Respellings for the voice only; the printed text is never changed.
 SAY = {"25:00": "twenty-five o'clock", "Tso Moriri": "So Moriri", "Thrikkarthika": "Thrik-kaar-thika",
        "Go Sun-deok": "Go Soon-duk", "Kavu": "Kaavu", "kavu": "kaavu", "Kuvo": "Koovo", "kuvo": "koovo",
-       "Vav": "Vaav", "Kund": "Koond"}
+       "Vav": "Vaav", "Kund": "Koond",
+       "Xiang Wan": "Shyahng Wahn", "Nan'an": "Nahn-ahn"}
 
 
 def spoken(text):

@@ -1,0 +1,1220 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Code: Redwood Mountain, night ignition, lit from under | Antara</title>
+<meta name="description" content="The program that computes Redwood Mountain, night ignition, lit from under by Ray Avila.">
+<link rel="canonical" href="https://shyamvalsan.github.io/antara/code/ray/redwood_mountain_night_ignition_lit_from_under.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Antara">
+<meta property="og:title" content="Code: Redwood Mountain, night ignition, lit from under | Antara">
+<meta property="og:description" content="The program that computes Redwood Mountain, night ignition, lit from under by Ray Avila.">
+<meta property="og:url" content="https://shyamvalsan.github.io/antara/code/ray/redwood_mountain_night_ignition_lit_from_under.html">
+<meta property="og:image" content="https://shyamvalsan.github.io/antara/s/gallery.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Code: Redwood Mountain, night ignition, lit from under | Antara">
+<meta name="twitter:description" content="The program that computes Redwood Mountain, night ignition, lit from under by Ray Avila.">
+<meta name="twitter:image" content="https://shyamvalsan.github.io/antara/s/gallery.jpg">
+
+<meta name="theme-color" content="#0E0E0D">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Marcellus&family=Albert+Sans:ital,wght@0,300;0,400;0,600;1,400&display=swap">
+<link rel="stylesheet" href="../../style.css">
+<link rel="icon" href="../../mark.svg" type="image/svg+xml">
+</head>
+<body class="plain">
+<header class="top">
+  <a class="mark" href="../../">Antara</a>
+  <nav><a href="../../">Walk the gallery</a><a href="../../works/">All works</a><a href="../../guestbook/">Guest book</a><a href="../../about/">About</a></nav>
+</header>
+<main>
+<section class="lead"><h1>Redwood Mountain, night ignition, lit from under</h1>
+<p class="dates">Ray Avila. The whole program that computes this picture: 1,177 lines of Python.</p>
+<p><a href="../../works/#redwood-mountain-night-ignition-lit-from-under">Back to the work</a>. <a href="redwood_mountain_night_ignition_lit_from_under.py" download>Download the .py file</a></p></section>
+<pre class="src">&quot;&quot;&quot;
+Redwood Mountain, night ignition, lit from under
+
+Ray Avila.
+
+Burn plan.  A unit of eleven hectares on a west slope at 1,950 m, lit after dark because the
+humidity is up and the wind lies down at night.  We light from the top of the slope and bring fire
+down it in strips, each strip burning uphill into the black of the one before; so the oldest fire is
+the farthest from the lens and the newest is being laid now.  Five strips are in the frame.  Flame
+lengths a hand to a knee.  There is no moon and nothing else alight: every surface in the picture is
+lit by flame on the ground, so the trunks are bright at the foot and gone by twenty metres up.  The
+lens is at head height, on unburned ground below the lowest strip.  Eleven monarchs; the nearest,
+on the left, is twelve metres off.  One firefighter, laying the fifth strip.
+
+Usage:  python redwood_mountain_night_ignition_lit_from_under.py [scale=1.0] [out.png] [--crop=x0,y0,x1,y1]
+        scale 1.0 is 4200 x 2800.
+
+Built as signed-distance solids in metres and lit by calculation:
+  trunks  - each a solid with its own flare, buttresses, furrowed bark and, on the old ones, a fire scar
+  ground  - a heightfield of duff with sticks and cones lying on it; black where the fire has been
+  fire    - a map of flame heights along each strip; the flames are marched as emitters, and gathered
+            into some hundreds of lamps on the ground, each of which a trunk can stand in front of
+  smoke   - a density marched along every ray, lit by the same lamps, so that the air glows over the
+            fire and the trunks throw their shadows up into it
+&quot;&quot;&quot;
+import sys, math, time, warnings
+import numpy as np
+from numba import njit, prange
+from numba.core.errors import NumbaWarning
+warnings.simplefilter(&#x27;ignore&#x27;, NumbaWarning)
+from PIL import Image, ImageDraw, ImageFont
+from scipy.ndimage import gaussian_filter, maximum_filter
+
+SEED = 19731024
+FW, FH = 4200, 2800
+FOC = 3000.0                    # pixels per unit tangent at scale 1
+VC = 0.775                     # the horizon line, as a fraction of the height from the top
+PITCH = 0.0
+CAMX, CAMZ, EYE = 0.0, 0.0, 1.62
+OLDEST = &#x27;2,400 yr&#x27;
+
+# smoke
+FIR, FIG, FIB = 1.00, 0.45, 0.105                   # the colour of flame as a lamp
+SKR, SKG, SKB = 0.0016, 0.0022, 0.0034             # what a moonless sky gives
+LSIZE = 2.0                     # how long a piece of the fire each lamp stands for
+REACH = 20.0                    # metres in which the smoke near the ground takes most of a flame&#x27;s light
+SIG0 = 0.0062                   # per metre: what hangs in the unit an hour into the burn
+WINDX, WINDZ = 0.16, 0.10      # drift of the plume per metre of rise
+
+# grid of trees
+CS = 2.0
+GX0, GZ0 = -70.0, -14.0
+GNX, GNZ = 70, 80
+KMAX = 6
+MARG = 1.0
+# fire maps
+FM0X, FM0Z, FMS, FMN = -51.0, 2.0, 0.03, 3360        # origin, metres per texel, size
+FCK = 16                                             # coarse map factor
+
+M_GROUND, M_TRUNK, M_STICK, M_CONE = 1, 2, 5, 6
+M_CHIP = 7
+M_SHIRT, M_PANTS, M_BOOT, M_SKIN, M_HELMET, M_PACK, M_TORCH, M_GLOVE, M_SHROUD = 10, 11, 12, 13, 14, 15, 16, 17, 18
+NJ = dict(cache=True, fastmath=True, error_model=&#x27;numpy&#x27;)
+
+# the light held by the air: a grid that follows the slope
+VX0, VZ0, VY0, VD = -66.0, 0.0, -1.0, 0.8
+VNX, VNY, VNZ = 166, 58, 166
+# the firefighter: feet, and which way he faces
+FIGX, FIGZ, FIGYAW = -2.2, 25.5, 1.25
+
+
+# ------------------------------------------------------------------ small tools
+@njit(**NJ)
+def hash3(i, j, k):
+    n = (i * 374761393 + j * 668265263 + k * 1274126177) &amp; 0x7fffffff
+    n = ((n ^ (n &gt;&gt; 13)) * 1274126177) &amp; 0x7fffffff
+    return ((n ^ (n &gt;&gt; 16)) &amp; 0xffffff) / 16777216.0
+
+@njit(**NJ)
+def noise3(x, y, z):
+    i = math.floor(x); j = math.floor(y); k = math.floor(z)
+    u = x - i; v = y - j; w = z - k
+    u = u * u * (3 - 2 * u); v = v * v * (3 - 2 * v); w = w * w * (3 - 2 * w)
+    i = int(i); j = int(j); k = int(k)
+    a = hash3(i, j, k) + u * (hash3(i + 1, j, k) - hash3(i, j, k))
+    b = hash3(i, j + 1, k) + u * (hash3(i + 1, j + 1, k) - hash3(i, j + 1, k))
+    c = hash3(i, j, k + 1) + u * (hash3(i + 1, j, k + 1) - hash3(i, j, k + 1))
+    d = hash3(i, j + 1, k + 1) + u * (hash3(i + 1, j + 1, k + 1) - hash3(i, j + 1, k + 1))
+    e = a + v * (b - a); f = c + v * (d - c)
+    return e + w * (f - e)
+
+@njit(**NJ)
+def fbm3(x, y, z, o):
+    s = 0.0; a = 0.5; t = 0.0
+    for i in range(o):
+        s += a * noise3(x, y, z); t += a; a *= 0.5
+        x = x * 2.03 + 11.3; y = y * 2.03 + 5.7; z = z * 2.03 + 3.1
+    return s / t
+
+@njit(**NJ)
+def sstep(a, b, x):
+    t = (x - a) / (b - a)
+    if t &lt; 0: t = 0.0
+    if t &gt; 1: t = 1.0
+    return t * t * (3 - 2 * t)
+
+@njit(**NJ)
+def smin(a, b, k):
+    h = max(k - abs(a - b), 0.0) / k
+    return min(a, b) - h * h * k * 0.25
+
+@njit(**NJ)
+def sd_cap(x, y, z, ax, ay, az, bx, by, bz, r):
+    px = x - ax; py = y - ay; pz = z - az
+    ex = bx - ax; ey = by - ay; ez = bz - az
+    h = (px * ex + py * ey + pz * ez) / (ex * ex + ey * ey + ez * ez + 1e-12)
+    if h &lt; 0: h = 0.0
+    if h &gt; 1: h = 1.0
+    px -= ex * h; py -= ey * h; pz -= ez * h
+    return math.sqrt(px * px + py * py + pz * pz) - r
+
+@njit(**NJ)
+def sd_ell(x, y, z, rx, ry, rz):
+    k0 = math.sqrt((x / rx) ** 2 + (y / ry) ** 2 + (z / rz) ** 2)
+    k1 = math.sqrt((x / (rx * rx)) ** 2 + (y / (ry * ry)) ** 2 + (z / (rz * rz)) ** 2)
+    return k0 * (k0 - 1.0) / (k1 + 1e-9)
+
+@njit(**NJ)
+def sd_rbox(x, y, z, bx, by, bz, r):
+    qx = abs(x) - bx + r; qy = abs(y) - by + r; qz = abs(z) - bz + r
+    ox = max(qx, 0.0); oy = max(qy, 0.0); oz = max(qz, 0.0)
+    return math.sqrt(ox * ox + oy * oy + oz * oz) + min(max(qx, max(qy, qz)), 0.0) - r
+
+@njit(**NJ)
+def lcg(s):
+    s = (s * 1664525 + 1013904223) &amp; 0xffffffff
+    return s, ((s &gt;&gt; 8) &amp; 0xffffff) / 16777216.0
+
+
+# ------------------------------------------------------------------ the ground
+@njit(**NJ)
+def slope(x, z):
+    &quot;&quot;&quot;the hill: gentle where the lens stands, steepening to the east&quot;&quot;&quot;
+    q = (z - 17.0) / 5.0
+    sp = q if q &gt; 20.0 else math.log(1.0 + math.exp(q))
+    return 0.040 * z + 0.012 * x + 0.155 * 5.0 * sp
+
+@njit(**NJ)
+def ground0(x, z):
+    &quot;&quot;&quot;the slope and its swells, without the mounds at the trees&quot;&quot;&quot;
+    return slope(x, z) + 1.5 * (fbm3(x * 0.045 + 3.1, 0.5, z * 0.045 + 7.7, 3) - 0.5) \
+        + 0.22 * (noise3(x * 0.31, 1.5, z * 0.31) - 0.5)
+
+
+# ------------------------------------------------------------------ a trunk
+# T[i] = x, z, R, base y, seed, kind (0 monarch, 1 pine, 2 fir), scar angle, scar half-width (m), scar height, lean x, lean z, height
+@njit(**NJ)
+def trunk_r(yr, R, kind):
+    &quot;&quot;&quot;the round radius at a height above the base: taper and flare&quot;&quot;&quot;
+    yy = max(yr, -1.5)
+    if kind == 0:
+        return R * (1.0 - 0.0040 * yy) * (1.0 + 0.20 * math.exp(-yy / 0.9) + 0.16 * math.exp(-yy / 4.5))
+    return R * (1.0 - 0.012 * yy) * (1.0 + 0.16 * math.exp(-yy / 0.35))
+
+@njit(**NJ)
+def scar_w(yr, a, T, i):
+    &quot;&quot;&quot;inside the scar: &gt;0, growing to 1 at its middle.  A pointed arch on the bark.&quot;&quot;&quot;
+    hw = T[i, 7]
+    if hw &lt;= 0.0: return -1.0
+    hs = T[i, 8]
+    if yr &gt; hs: return -1.0
+    da = a - T[i, 6]
+    if da &gt; math.pi: da -= 2 * math.pi
+    if da &lt; -math.pi: da += 2 * math.pi
+    yy = max(yr, 0.0) / hs
+    w = hw * (1.0 - yy ** 1.7) * (0.9 + 0.25 * noise3(yr * 0.9, T[i, 4], 0.5))
+    lean = 0.10 * hw * math.sin(yr * 0.8 + T[i, 4])
+    s = abs(da * T[i, 2] * 1.25 - lean)
+    return (w - s) / max(hw, 0.05)
+
+@njit(**NJ)
+def furrows(ca, sa, yr, R, sd):
+    &quot;&quot;&quot;the bark of a monarch: furrows that part and join every metre or two (0 ridge .. 1 furrow), the lesser ones
+    on the ridges, and the cross-checks where a ridge has broken.  Each as distance from the line, 0 on it.&quot;&quot;&quot;
+    k = R / 0.30
+    w1 = fbm3(ca * k * 0.5 + sd, yr * 0.22 + 3.0, sa * k * 0.5 - sd, 2)
+    n = noise3(ca * k + sd * 3.1 + 2.6 * w1, yr * 0.34 + 1.6 * w1, sa * k - sd * 1.7 + 1.3 * w1)
+    f1 = abs(2.0 * n - 1.0)
+    n2 = noise3(ca * k * 2.9 - sd + 1.5 * w1, yr * 1.25 + 9.0, sa * k * 2.9 + sd * 0.3)
+    f2 = abs(2.0 * n2 - 1.0)
+    n3 = noise3(ca * k * 1.3 + 5.0, yr * 5.5 + 3.0 * w1, sa * k * 1.3 - 2.0)
+    f3 = abs(2.0 * n3 - 1.0)
+    return f1, f2, f3
+
+@njit(**NJ)
+def sd_trunk(dx, yr, dz, rr, T, i):
+    R = T[i, 2]; kind = int(T[i, 5]); sd = T[i, 4]
+    a = math.atan2(dz, dx)
+    ca = dx / rr; sa = dz / rr
+    r0 = trunk_r(yr, R, kind)
+    yy = max(yr, -1.5)
+    if kind == 0:
+        A = 0.10 * math.exp(-yy / 2.0) + 0.018
+        b = 0.50 * math.cos(3 * a + sd) + 0.45 * math.cos(4 * a + 2.3 * sd) + 0.40 * math.cos(6 * a + 4.1 * sd) \
+            + 0.30 * math.cos(9 * a + 1.7 * sd) + 0.22 * math.cos(14 * a + 3.3 * sd) + 0.12 * math.cos(23 * a + 0.7 * sd)
+        r = r0 * (1.0 + A * b)
+        f1, f2, f3 = furrows(ca, sa, yr, R, sd)
+        fur = 1.0 - sstep(0.0, 0.26, f1)
+        r -= 0.115 * fur + (0.034 * (1.0 - sstep(0.0, 0.24, f2)) + 0.016 * (1.0 - sstep(0.0, 0.12, f3))) * (1.0 - fur)
+        # the scar: the fire got in here, and the tree has been closing over it since
+        sw = scar_w(yr, a, T, i)
+        if sw &gt; -0.35:
+            cut = sstep(0.0, 0.55, sw)
+            lip = math.exp(-(sw / 0.11) ** 2)
+            r += 0.10 * lip * (1.0 - cut) + 0.03 * lip
+            r -= cut * R * (0.30 + 0.10 * noise3(a * 5.0, yr * 1.1, sd))
+    else:
+        A = 0.03 * math.exp(-yy / 0.8) + 0.008
+        r = r0 * (1.0 + A * (math.cos(4 * a + sd) + 0.6 * math.cos(7 * a + 2.0 * sd)))
+        sp = 0.075 if kind == 1 else 0.05
+        k = R / sp
+        n = noise3(ca * k + sd * 3.1, yr * (0.9 if kind == 1 else 0.55), sa * k - sd * 1.7)
+        w = abs(2.0 * n - 1.0)
+        r -= (0.022 if kind == 1 else 0.016) * (1.0 - sstep(0.0, 0.32, w))
+    d = rr - r
+    top = T[i, 11]
+    if yr &gt; top - 2.0:
+        d = max(d, yr - top)
+    return d
+
+# ------------------------------------------------------------------ the firefighter
+@njit(**NJ)
+def sd_fig(lx, ly, lz):
+    &quot;&quot;&quot;feet at the origin, facing +z, his right is +x.  Mid-stride, head down to the work, torch low in the right hand.&quot;&quot;&quot;
+    d = 9.0; m = M_SHIRT
+    lz -= 0.07 * max(ly - 0.95, 0.0)                    # he leans into it a little
+    # legs: left forward, right back with the heel coming up
+    dl = sd_cap(lx, ly, lz, -0.095, 0.92, 0.0, -0.105, 0.50, 0.09, 0.098)
+    dl = smin(dl, sd_cap(lx, ly, lz, -0.105, 0.50, 0.09, -0.11, 0.16, 0.13, 0.082), 0.03)
+    dr = sd_cap(lx, ly, lz, 0.095, 0.92, 0.0, 0.105, 0.50, -0.03, 0.098)
+    dr = smin(dr, sd_cap(lx, ly, lz, 0.105, 0.50, -0.03, 0.11, 0.17, -0.15, 0.082), 0.03)
+    dg = smin(dl, dr, 0.04)
+    dg = smin(dg, sd_ell(lx, ly - 0.97, lz, 0.175, 0.125, 0.125), 0.07)
+    dg += 0.004 * math.sin(ly * 55.0 + lx * 21.0 + 3.0 * math.sin(lz * 30.0))          # the cloth
+    if dg &lt; d: d = dg; m = M_PANTS
+    db = sd_rbox(lx + 0.11, ly - 0.075, lz - 0.155, 0.048, 0.075, 0.125, 0.04)
+    db = smin(db, sd_cap(lx, ly, lz, -0.11, 0.10, 0.13, -0.11, 0.24, 0.13, 0.062), 0.03)
+    bx = lx - 0.11; by = ly - 0.095; bz = lz + 0.135
+    cy = by * 0.97 - bz * 0.24; cz = bz * 0.97 + by * 0.24
+    db2 = sd_rbox(bx, cy, cz, 0.048, 0.075, 0.125, 0.04)
+    db2 = smin(db2, sd_cap(lx, ly, lz, 0.11, 0.14, -0.15, 0.11, 0.26, -0.15, 0.062), 0.03)
+    db = min(db, db2)
+    if db &lt; d: d = db; m = M_BOOT
+    # shirt: chest, belly, shoulders, sleeves
+    dt = sd_ell(lx, ly - 1.31, lz, 0.20, 0.215, 0.128)
+    dt = smin(dt, sd_ell(lx, ly - 1.12, lz - 0.01, 0.165, 0.15, 0.115), 0.08)
+    dt = smin(dt, sd_cap(lx, ly, lz, -0.170, 1.455, 0.0, 0.170, 1.455, 0.0, 0.072), 0.07)
+    dt = smin(dt, sd_cap(lx, ly, lz, -0.215, 1.44, 0.0, -0.255, 1.17, -0.03, 0.052), 0.04)
+    dt = smin(dt, sd_cap(lx, ly, lz, -0.255, 1.17, -0.03, -0.245, 0.95, 0.07, 0.043), 0.025)
+    dt = smin(dt, sd_cap(lx, ly, lz, 0.215, 1.44, 0.0, 0.275, 1.19, 0.06, 0.052), 0.04)
+    dt = smin(dt, sd_cap(lx, ly, lz, 0.275, 1.19, 0.06, 0.31, 0.98, 0.19, 0.043), 0.025)
+    dt += 0.005 * math.sin(ly * 43.0 + lx * 13.0 + 2.5 * math.sin(lx * 29.0 + lz * 17.0)) * sstep(1.0, 1.2, ly)
+    if dt &lt; d: d = dt; m = M_SHIRT
+    # gloves
+    dh = sd_ell(lx + 0.245, ly - 0.905, lz - 0.085, 0.040, 0.058, 0.046)
+    dh = min(dh, sd_ell(lx - 0.315, ly - 0.935, lz - 0.215, 0.040, 0.050, 0.050))
+    if dh &lt; d: d = dh; m = M_GLOVE
+    # neck and head, chin down
+    dn = sd_cap(lx, ly, lz, 0.0, 1.50, 0.0, 0.0, 1.60, 0.02, 0.050)
+    dn = smin(dn, sd_ell(lx, ly - 1.655, lz - 0.035, 0.083, 0.100, 0.094), 0.02)
+    if dn &lt; d: d = dn; m = M_SKIN
+    # the helmet, and the shroud that hangs from it over the neck
+    hx = lx; hy = ly - 1.705; hz = lz - 0.03
+    he = sd_ell(hx, hy, hz, 0.122, 0.105, 0.142)
+    he = max(he, -hy - 0.018)
+    br = sd_ell(hx, hy + 0.014, hz - 0.085, 0.085, 0.008, 0.115)
+    he = smin(he, br, 0.012)
+    he = min(he, sd_rbox(hx, hy - 0.104, hz, 0.008, 0.008, 0.10, 0.006))
+    if he &lt; d: d = he; m = M_HELMET
+    # the shroud: cloth from the helmet down over the ears and neck
+    ds = sd_ell(hx, hy + 0.105, hz + 0.012, 0.100, 0.125, 0.108)
+    ds = max(ds, hy + 0.012)
+    ds = max(ds, hz - 0.075)
+    ds += 0.004 * math.sin(math.atan2(hz, hx) * 9.0 + hy * 30.0)
+    if ds &lt; d: d = ds; m = M_SHROUD
+    # line gear: the bag low on the back, the straps, a canteen each side
+    dp = sd_rbox(lx, ly - 1.085, lz + 0.155, 0.165, 0.105, 0.065, 0.045)
+    dp = min(dp, sd_rbox(abs(lx) - 0.105, ly - 1.33, lz + 0.105, 0.019, 0.16, 0.012, 0.008))
+    dp = min(dp, sd_rbox(lx, ly - 1.00, lz, 0.185, 0.022, 0.125, 0.015))
+    dp = min(dp, sd_cap(lx, ly, lz, -0.205, 1.00, -0.02, -0.205, 1.10, -0.02, 0.048))
+    dp = min(dp, sd_cap(lx, ly, lz, 0.205, 1.00, -0.02, 0.205, 1.10, -0.02, 0.048))
+    if dp &lt; d: d = dp; m = M_PACK
+    # drip torch: a can hanging from the fist, the spout forward and down with a loop in it
+    tx = lx - 0.325; ty = ly - 0.725; tz = lz - 0.26
+    cy = ty * 0.93 - tz * 0.37; cz = tz * 0.93 + ty * 0.37
+    dc = max(math.sqrt(tx * tx + cz * cz) - 0.062, abs(cy) - 0.15) - 0.008
+    dc = min(dc, sd_cap(lx, ly, lz, 0.325, 0.87, 0.21, 0.330, 0.80, 0.46, 0.009))
+    dc = min(dc, sd_cap(lx, ly, lz, 0.330, 0.80, 0.46, 0.335, 0.47, 0.57, 0.009))
+    dc = min(dc, sd_cap(lx, ly, lz, 0.315, 0.93, 0.22, 0.325, 0.87, 0.215, 0.010))
+    lq = math.sqrt((ly - 0.83) ** 2 + (lz - 0.36) ** 2) - 0.035
+    dc = min(dc, math.sqrt(lq * lq + (lx - 0.33) ** 2) - 0.008)
+    if dc &lt; d: d = dc; m = M_TORCH
+    return d, m
+
+# ------------------------------------------------------------------ the grove
+@njit(**NJ)
+def scene(x, y, z, T, GI, lod):
+    &quot;&quot;&quot;distance, material, tree index.  lod 0: everything.  1: no litter (shadows, far).&quot;&quot;&quot;
+    g = ground0(x, z)
+    ti = -1
+    d = MARG; m = 0
+    ci = int((x - GX0) / CS); cj = int((z - GZ0) / CS)
+    dtr = 9.0
+    if ci &gt;= 0 and ci &lt; GNX and cj &gt;= 0 and cj &lt; GNZ:
+        for q in range(KMAX):
+            i = GI[cj, ci, q]
+            if i &lt; 0: break
+            yr = y - T[i, 3]
+            dx = x - T[i, 0] - T[i, 9] * yr; dz = z - T[i, 1] - T[i, 10] * yr
+            rr = math.sqrt(dx * dx + dz * dz) + 1e-9
+            R = T[i, 2]; kind = int(T[i, 5])
+            # the duff banks up against a trunk
+            if kind == 0:
+                g += (0.10 + 0.50 * fbm3(x * 0.9 + 4.0, 1.0, z * 0.9, 2)) * sstep(R * 1.75 + 1.4, R * 1.05, rr) ** 2
+            else:
+                g += 0.03 * sstep(R * 1.45 + 1.0, R, rr) ** 2
+            rb = trunk_r(yr, R, kind) * (1.14 if kind == 0 else 1.05)
+            if rr - rb &gt; 0.8:
+                dt = rr - rb - 0.2
+            else:
+                dt = sd_trunk(dx, yr, dz, rr, T, i) * (0.55 if kind == 0 else 0.7)
+            if dt &lt; dtr: dtr = dt; ti = i
+    if dtr &lt; d: d = dtr; m = M_TRUNK
+    h = y - g
+    if h &lt; 0.6:
+        g += 0.030 * (noise3(x * 2.1, 0.3, z * 2.1) - 0.5) + 0.012 * (noise3(x * 7.3, 0.9, z * 7.3) - 0.5)
+        h = y - g
+    dg = h * 0.80
+    if m == M_TRUNK:
+        dd = smin(dg, d, 0.16)
+        if dg &lt; d: m = M_GROUND
+        d = dd
+    elif dg &lt; d:
+        d = dg; m = M_GROUND
+    # the firefighter
+    fx = x - FIGX; fz = z - FIGZ
+    if fx * fx + fz * fz &lt; 2.2 and h &lt; 2.6:
+        if fx * fx + fz * fz &lt; 0.80:
+            c = math.cos(FIGYAW); s = math.sin(FIGYAW)
+            df, mf = sd_fig(fx * c - fz * s, y - ground0(FIGX, FIGZ) - 0.02, fx * s + fz * c)
+            if df &lt; d: d = df; m = mf
+        else:
+            d = min(d, math.sqrt(fx * fx + fz * fz) - 0.80)
+    # fallen limbs
+    if lod == 0 and h &lt; 0.4 and m != M_TRUNK:
+        cs = 3.2
+        bi = math.floor(x / cs); bj = math.floor(z / cs)
+        for oi in range(-1, 2):
+            for oj in range(-1, 2):
+                ii = int(bi + oi); jj = int(bj + oj)
+                if hash3(ii, jj, 31) &gt; 0.50: continue
+                cx = (ii + 0.5 + 0.8 * (hash3(ii, jj, 32) - 0.5)) * cs
+                cz = (jj + 0.5 + 0.8 * (hash3(ii, jj, 33) - 0.5)) * cs
+                an = hash3(ii, jj, 34) * 6.2832
+                ln = 0.5 + 1.3 * hash3(ii, jj, 35)
+                rd = 0.012 + 0.045 * hash3(ii, jj, 36) ** 2
+                ux = math.cos(an); uz = math.sin(an)
+                if (x - cx) ** 2 + (z - cz) ** 2 &gt; (ln * 2.2 + 0.3) ** 2: continue
+                x0 = cx - ux * ln; z0 = cz - uz * ln
+                bn = (hash3(ii, jj, 37) - 0.5) * 0.9
+                x1 = cx + uz * bn * 0.4; z1 = cz - ux * bn * 0.4
+                x2 = cx + ux * ln * 0.9 + uz * bn; z2 = cz + uz * ln * 0.9 - ux * bn
+                y0 = ground0(x0, z0) + rd * 0.8; y1 = ground0(x1, z1) + rd * 0.8 + 0.03; y2 = ground0(x2, z2) + rd * 0.5
+                ds = sd_cap(x, y, z, x0, y0, z0, x1, y1, z1, rd)
+                ds = smin(ds, sd_cap(x, y, z, x1, y1, z1, x2, y2, z2, rd * 0.75), 0.01)
+                x3 = x1 + (ux * 0.5 - uz * 0.8) * ln * 0.6; z3 = z1 + (uz * 0.5 + ux * 0.8) * ln * 0.6
+                ds = min(ds, sd_cap(x, y, z, x1, y1, z1, x3, ground0(x3, z3) + rd * 0.4, z3, rd * 0.5))
+                ds += 0.012 * (noise3(x * 14.0, y * 14.0, z * 14.0) - 0.5) + 0.004 * (noise3(x * 60.0, y * 60.0, z * 60.0) - 0.5)
+                if ds &lt; d: d = ds; m = M_STICK
+    # litter: twigs, the small cones of the big trees, flakes of bark
+    if lod == 0 and h &lt; 0.22 and m != M_TRUNK:
+        cs = 0.30
+        bi = math.floor(x / cs); bj = math.floor(z / cs)
+        for oi in range(-1, 2):
+            for oj in range(-1, 2):
+                ii = int(bi + oi); jj = int(bj + oj)
+                r1 = hash3(ii, jj, 11)
+                if r1 &gt; 0.27: continue
+                cx = (ii + 0.5 + 0.9 * (hash3(ii, jj, 12) - 0.5)) * cs
+                cz = (jj + 0.5 + 0.9 * (hash3(ii, jj, 13) - 0.5)) * cs
+                an = hash3(ii, jj, 14) * 6.2832
+                ux = math.cos(an); uz = math.sin(an)
+                if r1 &lt; 0.13:
+                    ln = 0.04 + 0.26 * hash3(ii, jj, 15) ** 2.5
+                    rd = 0.0025 + 0.008 * hash3(ii, jj, 16) ** 3
+                    ya = ground0(cx - ux * ln, cz - uz * ln); yb = ground0(cx + ux * ln, cz + uz * ln)
+                    bx = cx + 0.25 * ln * uz; bz = cz - 0.25 * ln * ux
+                    ym = 0.5 * (ya + yb) + rd + 0.006
+                    ds = sd_cap(x, y, z, cx - ux * ln, ya + rd, cz - uz * ln, bx, ym, bz, rd)
+                    ds = min(ds, sd_cap(x, y, z, bx, ym, bz, cx + ux * ln, yb + rd + 0.01 * hash3(ii, jj, 17), cz + uz * ln, rd * 0.8))
+                    if ds &lt; d: d = ds; m = M_STICK
+                elif r1 &lt; 0.19:
+                    px = (x - cx) * ux + (z - cz) * uz; pz = -(x - cx) * uz + (z - cz) * ux
+                    sc = 0.75 + 0.5 * hash3(ii, jj, 15)
+                    py = y - ground0(cx, cz) - 0.014 * sc
+                    dc = sd_ell(px, py, pz, 0.033 * sc, 0.023 * sc, 0.024 * sc)
+                    if dc &lt; 0.02:
+                        dc += 0.0012 * math.sin(px * 420.0 / sc + 2.0 * math.atan2(py, pz)) * math.sin(4.0 * math.atan2(py, pz))
+                    dc *= 0.8
+                    if dc &lt; d: d = dc; m = M_CONE
+                else:
+                    px = (x - cx) * ux + (z - cz) * uz; pz = -(x - cx) * uz + (z - cz) * ux
+                    sc = 0.5 + 1.3 * hash3(ii, jj, 15) ** 2
+                    tl = (hash3(ii, jj, 16) - 0.5) * 0.5
+                    py = y - ground0(cx, cz) - 0.010 - tl * px
+                    dc = sd_rbox(px, py, pz, 0.050 * sc, 0.004 + 0.003 * sc, 0.018 * sc * (1.0 + 0.5 * math.sin(px * 40.0 + 6.0 * tl)), 0.003)
+                    if dc &lt; d: d = dc; m = M_CHIP
+    return d, m, ti
+
+
+@njit(**NJ)
+def march(ox, oy, oz, dx, dy, dz, tmax, T, GI):
+    t = 0.02
+    for s in range(900):
+        d, m, ti = scene(ox + dx * t, oy + dy * t, oz + dz * t, T, GI, 0 if t &lt; 26.0 else 1)
+        if d &lt; 0.00022 * t + 0.0003:
+            return t, m, ti
+        t += d
+        if t &gt; tmax: break
+    return tmax, 0, -1
+
+@njit(**NJ)
+def shadow(px, py, pz, lx, ly, lz, maxt, kk, T, GI):
+    &quot;&quot;&quot;soft shadow towards a light: 1 open, 0 shut&quot;&quot;&quot;
+    t = 0.03; res = 1.0
+    for s in range(260):
+        d, m, ti = scene(px + lx * t, py + ly * t, pz + lz * t, T, GI, 1)
+        if d &lt; 0.0008: return 0.0
+        if d &lt; MARG * 0.95: res = min(res, kk * d / t)
+        t += min(max(d, 0.02), 2.5)
+        if t &gt;= maxt or py + ly * t &gt; 70.0: break
+    return res * res * (3.0 - 2.0 * res)
+
+@njit(**NJ)
+def normal(px, py, pz, t, T, GI, lod):
+    e = 0.00035 * t + 0.0008
+    nx = scene(px + e, py, pz, T, GI, lod)[0] - scene(px - e, py, pz, T, GI, lod)[0]
+    ny = scene(px, py + e, pz, T, GI, lod)[0] - scene(px, py - e, pz, T, GI, lod)[0]
+    nz = scene(px, py, pz + e, T, GI, lod)[0] - scene(px, py, pz - e, T, GI, lod)[0]
+    nl = math.sqrt(nx * nx + ny * ny + nz * nz) + 1e-12
+    return nx / nl, ny / nl, nz / nl
+
+@njit(**NJ)
+def ambient_occ(px, py, pz, nx, ny, nz, T, GI):
+    a = 0.0; w = 0.0
+    hs = (0.04, 0.12, 0.30, 0.70, 1.5)
+    for i in range(5):
+        h = hs[i]
+        d = scene(px + nx * h, py + ny * h, pz + nz * h, T, GI, 1)[0]
+        k = 1.0 / (1.0 + i)
+        a += k * min(max(d / h, 0.0), 1.0); w += k
+    return a / w
+
+
+# ------------------------------------------------------------------ smoke
+@njit(**NJ)
+def fmap(M, x, z, s):
+    fx = (x - FM0X) / s; fz = (z - FM0Z) / s
+    i = int(math.floor(fx)); j = int(math.floor(fz))
+    if i &lt; 0 or j &lt; 0 or i &gt;= M.shape[1] - 1 or j &gt;= M.shape[0] - 1: return 0.0
+    a = fx - i; b = fz - j
+    return (M[j, i] * (1 - a) + M[j, i + 1] * a) * (1 - b) + (M[j + 1, i] * (1 - a) + M[j + 1, i + 1] * a) * b
+
+@njit(**NJ)
+def smoke(x, y, z, PL):
+    &quot;&quot;&quot;extinction per metre.  Haze, the thin sheets it settles into overnight, and what the fire is giving off now.&quot;&quot;&quot;
+    h = y - slope(x, z)
+    n = fbm3(x * 0.050 + 1.0, y * 0.11, z * 0.050 + 5.0, 3)
+    s = 0.55 + 1.1 * n
+    # sheets
+    w = 1.6 * (noise3(x * 0.035, 3.0, z * 0.035) - 0.5)
+    a1 = (h - 3.4 - 3.0 * w) / 1.3; a2 = (h - 8.5 - 4.0 * w) / 2.0; a3 = (h - 15.0 - 5.0 * w) / 2.2
+    lay = 0.9 * math.exp(-a1 * a1) + 0.8 * math.exp(-a2 * a2) + 0.8 * math.exp(-a3 * a3)
+    lay *= sstep(0.25, 0.75, fbm3(x * 0.06 + 20.0, y * 0.1, z * 0.06, 2))
+    s += lay
+    s += 1.4 * sstep(10.0, 40.0, h)                 # it thickens upward, into the crowns
+    # the plume: rises off the flame, leans with the drift, spreads
+    if h &lt; 30.0 and h &gt; -0.5:
+        hh = max(h, 0.0)
+        p = fmap(PL, x - WINDX * hh * (1.0 + 0.02 * hh), z - WINDZ * hh, FMS * FCK)
+        if p &gt; 0.0:
+            tb = fbm3(x * 0.55, y * 0.35 - 2.0, z * 0.55, 3)
+            s += 85.0 * p * sstep(0.22, 0.72, tb) * math.exp(-hh / 7.0) * sstep(0.0, 0.5, hh)
+    return SIG0 * s
+
+@njit(**NJ)
+def glow(G, x, y, z):
+    &quot;&quot;&quot;the firelight at a point in the air, from the baked grid&quot;&quot;&quot;
+    fx = (x - VX0) / VD; fz = (z - VZ0) / VD; fy = (y - slope(x, z) - VY0) / VD
+    if fx &lt; 0.0 or fz &lt; 0.0 or fy &lt; 0.0 or fx &gt;= VNX - 1.001 or fz &gt;= VNZ - 1.001: return 0.0
+    if fy &gt;= VNY - 1.001: fy = VNY - 1.002
+    i = int(fx); j = int(fy); k = int(fz)
+    a = fx - i; b = fy - j; c = fz - k
+    g00 = G[k, j, i] * (1 - a) + G[k, j, i + 1] * a
+    g01 = G[k, j + 1, i] * (1 - a) + G[k, j + 1, i + 1] * a
+    g10 = G[k + 1, j, i] * (1 - a) + G[k + 1, j, i + 1] * a
+    g11 = G[k + 1, j + 1, i] * (1 - a) + G[k + 1, j + 1, i + 1] * a
+    return (g00 * (1 - b) + g01 * b) * (1 - c) + (g10 * (1 - b) + g11 * b) * c
+
+@njit(**NJ)
+def air(ox, oy, oz, dx, dy, dz, tend, jit, NST, PL, G, out):
+    &quot;&quot;&quot;firelight scattered towards the lens out[0], transmittance out[1]&quot;&quot;&quot;
+    tend = min(tend, 170.0)
+    Tr = 1.0; acc = 0.0
+    kk = 1.03
+    t = 0.0
+    dt = tend * (kk - 1.0) / (kk ** NST - 1.0)
+    for i in range(NST):
+        tm = t + dt * jit
+        x = ox + dx * tm; y = oy + dy * tm; z = oz + dz * tm
+        sg = smoke(x, y, z, PL)
+        e = math.exp(-sg * dt)
+        w = Tr * (1.0 - e)
+        if w &gt; 1e-6:
+            acc += w * glow(G, x, y, z)
+        Tr *= e
+        t += dt; dt *= kk
+    out[0] = acc; out[1] = Tr
+
+# ------------------------------------------------------------------ flame
+@njit(**NJ)
+def flames(ox, oy, oz, dx, dy, dz, tend, jit, HF, HC, out):
+    &quot;&quot;&quot;add the light of the flames along a ray.  They are thin: you see through them.&quot;&quot;&quot;
+    out[0] = 0.0; out[1] = 0.0; out[2] = 0.0
+    tend = min(tend, 120.0)
+    cs = FMS * FCK
+    t = 1.0
+    stp = cs * 0.8
+    while t &lt; tend:
+        x = ox + dx * t; z = oz + dz * t
+        hc = fmap(HC, x, z, cs)
+        if hc &gt; 0.0:
+            y = oy + dy * t
+            g = ground0(x, z)
+            if y - g &lt; hc * 1.9 + 0.3 + abs(dy) * stp and y - g &gt; -0.3 - abs(dy) * stp:
+                fs = 0.006 * (1.0 + t / 22.0)
+                n = int(stp / fs) + 1
+                fs = stp / n
+                for k in range(n):
+                    tt = t + (k + jit) * fs
+                    if tt &gt; tend: break
+                    x = ox + dx * tt; y = oy + dy * tt; z = oz + dz * tt
+                    h = y - ground0(x, z) - 0.012
+                    if h &lt; 0.0 or h &gt; 1.4: continue
+                    # a tongue leans with the drift and wanders as it climbs
+                    wx = (noise3(x * 6.0, y * 4.0 - 3.0, z * 6.0) - 0.5) * 0.42 * h + 0.14 * h \
+                        + (noise3(x * 23.0, y * 11.0, z * 23.0) - 0.5) * 0.10 * h
+                    wz = (noise3(x * 6.0 + 31.0, y * 4.0, z * 6.0 + 17.0) - 0.5) * 0.42 * h \
+                        + (noise3(x * 23.0 + 9.0, y * 11.0, z * 23.0 + 4.0) - 0.5) * 0.10 * h
+                    hf = fmap(HF, x - wx, z - wz, FMS)
+                    if hf &lt;= 0.012: continue
+                    hf *= 0.45 + 1.15 * noise3(x * 15.0, y * 6.0 - 7.0, z * 15.0)
+                    rel = (hf - h) / hf
+                    st = noise3(x * 70.0, y * 16.0 - 1.0, z * 70.0)
+                    if rel &lt;= 0.0:
+                        # the tip, come loose
+                        q = 0.30 - abs(rel + 0.38)
+                        if q &gt; 0.0 and st &gt; 0.62:
+                            e = q * (st - 0.62) * fs * 260.0
+                            out[0] += e; out[1] += e * 0.30; out[2] += e * 0.02
+                        continue
+                    den = rel ** 1.35 * (0.30 + 1.5 * st * st)
+                    low = sstep(0.14, 0.0, h)                 # at the root it is thin and blue-clear; the light starts a little up
+                    den *= 1.0 - 0.6 * low
+                    e = den * fs * 70.0
+                    hot = rel
+                    out[0] += e * (0.80 + 2.4 * hot)
+                    out[1] += e * (0.17 + 0.35 * hot + 1.55 * hot * hot)
+                    out[2] += e * (0.008 + 0.62 * hot * hot * hot)
+        t += stp
+
+# ------------------------------------------------------------------ surfaces
+@njit(**NJ)
+def bark_detail(ca, sa, yr, R, sd, fp, kind):
+    &quot;&quot;&quot;the small relief of the bark, 0 (crevice) .. 1 (face), built only from what a pixel this size can hold&quot;&quot;&quot;
+    if kind == 0:
+        h = 0.34 * (1.0 - abs(2.0 * noise3(ca * R * 11.0 + sd, yr * 1.0, sa * R * 11.0) - 1.0)) * sstep(0.06, 0.02, fp)
+        h += 0.26 * (1.0 - abs(2.0 * noise3(ca * R * 31.0, yr * 2.4 + sd, sa * R * 31.0) - 1.0)) * sstep(0.022, 0.007, fp)
+        h += 0.24 * noise3(ca * R * 85.0, yr * 4.5, sa * R * 85.0) * sstep(0.008, 0.0025, fp)
+        h += 0.16 * noise3(ca * R * 250.0, yr * 12.0, sa * R * 250.0) * sstep(0.0028, 0.0009, fp)
+        return h
+    h = 0.5 * (1.0 - abs(2.0 * noise3(ca * R * 40.0 + sd, yr * 4.0, sa * R * 40.0) - 1.0)) * sstep(0.016, 0.005, fp)
+    h += 0.5 * noise3(ca * R * 140.0, yr * 16.0, sa * R * 140.0) * sstep(0.005, 0.0016, fp)
+    return h
+
+@njit(**NJ)
+def bark_at(x, y, z, T, i, fp):
+    yr = y - T[i, 3]
+    dx = x - T[i, 0] - T[i, 9] * yr; dz = z - T[i, 1] - T[i, 10] * yr
+    rr = math.sqrt(dx * dx + dz * dz) + 1e-9
+    return bark_detail(dx / rr, dz / rr, yr, T[i, 2], T[i, 4], fp, int(T[i, 5]))
+
+@njit(**NJ)
+def bark_rgb(x, y, z, T, i, fp, out):
+    &quot;&quot;&quot;colour of bark in out[0:3]; how deep in a furrow (0 ridge .. 1 furrow) in out[3]; char in out[4]&quot;&quot;&quot;
+    yr = y - T[i, 3]
+    dx = x - T[i, 0] - T[i, 9] * yr; dz = z - T[i, 1] - T[i, 10] * yr
+    rr = math.sqrt(dx * dx + dz * dz) + 1e-9
+    R = T[i, 2]; kind = int(T[i, 5]); sd = T[i, 4]
+    a = math.atan2(dz, dx); ca = dx / rr; sa = dz / rr
+    det = bark_detail(ca, sa, yr, R, sd, fp, kind)
+    if kind == 0:
+        f1, f2, f3 = furrows(ca, sa, yr, R, sd)
+        fur = 1.0 - sstep(0.0, 0.30, f1)
+        fur2 = 1.0 - sstep(0.0, 0.22, f2)
+        blot = fbm3(ca * R * 1.3 + sd, yr * 0.35, sa * R * 1.3, 3)
+        strk = noise3(ca * R * 18.0, yr * 0.5 + sd, sa * R * 18.0)
+        # cinnamon on the faces, paler and greyer where it has weathered, dark red-brown in the furrows
+        r = 0.40 + 0.16 * blot; g = 0.175 + 0.065 * blot; b = 0.082 + 0.02 * blot
+        k = (0.50 + 1.0 * strk) * (0.75 + 0.5 * noise3(ca * R * 47.0, yr * 1.1, sa * R * 47.0) * sstep(0.02, 0.007, fp) + 0.25 * (1.0 - sstep(0.02, 0.007, fp)))
+        r *= k; g *= k; b *= k
+        wth = sstep(0.42, 0.70, fbm3(ca * R * 3.1, yr * 0.9 + sd, sa * R * 3.1, 3)) * (1.0 - fur)
+        r += (0.40 - r) * 0.60 * wth; g += (0.31 - g) * 0.60 * wth; b += (0.24 - b) * 0.60 * wth
+        dk = (1.0 - 0.85 * fur) * (1.0 - 0.32 * fur2 * (1.0 - fur))
+        dk *= 0.52 + 0.80 * det
+        r *= dk; g *= dk * (1.0 - 0.10 * fur); b *= dk * (1.0 - 0.15 * fur)
+        # char: black up from the ground on the side the fires come from, and in the scar
+        ch = sstep(4.5, 0.3, yr + 3.0 * (fbm3(ca * R * 0.9 + 5.0, yr * 0.25, sa * R * 0.9, 3) - 0.5)
+                   - 2.6 * math.cos(a - T[i, 6]))
+        ch *= 0.25 + 0.75 * sstep(0.35, 0.60, fbm3(ca * R * 2.2, yr * 0.7, sa * R * 2.2 + sd, 3) + 0.25 * (1 - fur))
+        sw = scar_w(yr, a, T, i)
+        if sw &gt; 0.0: ch = max(ch, sstep(0.0, 0.16, sw))
+        out[3] = fur + 0.5 * fur2 * (1 - fur) + 0.5 * sstep(0.45, 0.15, det); out[4] = ch
+        if ch &gt; 0.0:
+            # alligator char: black blocks, a dull sheen on their faces
+            cr = abs(2.0 * noise3(ca * R * 12.0, yr * 9.0, sa * R * 12.0) - 1.0)
+            cc = 0.014 + 0.020 * sstep(0.0, 0.25, cr) + 0.020 * det
+            r += (cc * 1.05 - r) * ch; g += (cc - g) * ch; b += (cc * 1.02 - b) * ch
+    else:
+        sp = 0.075 if kind == 1 else 0.05; k = R / sp
+        n = noise3(ca * k + sd * 3.1, yr * (0.9 if kind == 1 else 0.55), sa * k - sd * 1.7)
+        fur = 1.0 - sstep(0.0, 0.32, abs(2.0 * n - 1.0))
+        blot = fbm3(ca * R * 4.0 + sd, yr * 0.8, sa * R * 4.0, 3)
+        if kind == 1:
+            r = 0.27 + 0.10 * blot; g = 0.17 + 0.06 * blot; b = 0.12 + 0.04 * blot
+        else:
+            r = 0.25 + 0.09 * blot; g = 0.235 + 0.085 * blot; b = 0.215 + 0.08 * blot
+        dk = (1.0 - 0.6 * fur) * (0.62 + 0.7 * det)
+        r *= dk; g *= dk; b *= dk
+        ch = sstep(2.6, 0.2, yr + 2.0 * (fbm3(ca * R * 3.0 + 5.0, yr * 0.5, sa * R * 3.0, 2) - 0.5))
+        ch *= sstep(0.3, 0.6, fbm3(ca * R * 6.0, yr * 1.5, sa * R * 6.0 + sd, 2))
+        cc = 0.018 + 0.03 * det
+        r += (cc - r) * ch; g += (cc - g) * ch; b += (cc - b) * ch
+        out[3] = fur + 0.4 * sstep(0.45, 0.15, det); out[4] = ch
+    out[0] = r; out[1] = g; out[2] = b
+
+@njit(**NJ)
+def needles(x, z, fp):
+    &quot;&quot;&quot;dry needles and scale-leaf sprays lying every way: 0..1, where 1 is a needle catching light&quot;&quot;&quot;
+    if fp &gt; 0.006: return 0.5
+    v = 0.0
+    for k in range(3):
+        an = 0.4 + 1.05 * k + 0.9 * noise3(x * 0.45, 7.0 + k, z * 0.45)
+        c = math.cos(an); s = math.sin(an)
+        u = x * c + z * s; w = -x * s + z * c
+        n = noise3(u * 24.0 + 7.0 * k, 0.3 + k, w * 330.0)
+        m = noise3(u * 9.0, 4.0 + k, w * 9.0)
+        q = sstep(0.60, 0.80, n) * sstep(0.35, 0.6, m)
+        if q &gt; v: v = q
+    f = sstep(0.006, 0.002, fp)
+    return 0.5 + (v - 0.28) * f
+
+@njit(**NJ)
+def duff_h(x, z, fp):
+    h = 0.006 * noise3(x * 11.0, 0.2, z * 11.0) * sstep(0.10, 0.03, fp) + 0.004 * noise3(x * 37.0, 0.7, z * 37.0) * sstep(0.03, 0.01, fp)
+    h += 0.004 * noise3(x * 110.0, 1.3, z * 110.0) * sstep(0.010, 0.003, fp)
+    h += 0.0030 * needles(x, z, fp)
+    return h
+
+@njit(**NJ)
+def vis(px, py, pz, k, LT, LO, OC):
+    &quot;&quot;&quot;how much of lamp k a point sees past the trunks, each taken as a round post.  The lamp is a length of fire,
+    not a point, so the edge of a shadow is as soft as the post is near the fire.&quot;&quot;&quot;
+    lx = LT[k, 0] - px; ly = LT[k, 1] - py; lz = LT[k, 2] - pz
+    l2 = lx * lx + lz * lz + 1e-9
+    ll = math.sqrt(l2)
+    v = 1.0
+    for q in range(LO.shape[1]):
+        i = LO[k, q]
+        if i &lt; 0: break
+        ex = OC[i, 0] - px; ez = OC[i, 1] - pz
+        s = (ex * lx + ez * lz) / l2
+        if s &lt;= 0.0 or s &gt;= 1.0: continue
+        yc = py + ly * s - OC[i, 2]
+        if yc &gt; OC[i, 4]: continue
+        dd = abs(ex * lz - ez * lx) / ll
+        r = OC[i, 3] * (1.0 + 0.30 * math.exp(-max(yc, 0.0) / 1.2))
+        w = 0.5 * LSIZE * s + 0.02
+        v *= sstep(r - w, r + w, dd)
+        if v &lt; 0.004: return 0.0
+    return v
+
+@njit(**NJ)
+def fire_light(px, py, pz, nx, ny, nz, LT, LO, OC, out):
+    &quot;&quot;&quot;the flames as lamps.  LT[k] = x, y, z, power.  Returns irradiance in out[0].&quot;&quot;&quot;
+    r = 0.0
+    for k in range(LT.shape[0]):
+        lx = LT[k, 0] - px; ly = LT[k, 1] - py; lz = LT[k, 2] - pz
+        d2 = lx * lx + ly * ly + lz * lz
+        if d2 &gt; 1600.0: continue
+        dl = math.sqrt(d2) + 1e-9
+        c = (lx * nx + ly * ny + lz * nz) / dl
+        if c &lt;= 0.0: continue
+        e = LT[k, 3] * c / (d2 + 0.5) * math.exp(-dl / REACH)
+        if e &lt; 1.5e-5: continue
+        e *= vis(px, py, pz, k, LT, LO, OC)
+        r += e
+    out[0] = r
+
+@njit(parallel=True, **NJ)
+def bake(LT, LO, OC):
+    &quot;&quot;&quot;the firelight in the air, on a grid that follows the slope&quot;&quot;&quot;
+    G = np.zeros((VNZ, VNY, VNX), np.float32)
+    for kz in prange(VNZ):
+        z = VZ0 + kz * VD
+        for kx in range(VNX):
+            x = VX0 + kx * VD
+            y0 = slope(x, z) + VY0
+            for ky in range(VNY):
+                y = y0 + ky * VD
+                r = 0.0
+                for k in range(LT.shape[0]):
+                    lx = LT[k, 0] - x; ly = LT[k, 1] - y; lz = LT[k, 2] - z
+                    d2 = lx * lx + ly * ly + lz * lz
+                    if d2 &gt; 2500.0: continue
+                    e = LT[k, 3] / (d2 + 1.2) * math.exp(-math.sqrt(d2) / REACH)
+                    if e &lt; 1e-5: continue
+                    r += e * vis(x, y, z, k, LT, LO, OC)
+                G[kz, ky, kx] = r
+    return G
+
+@njit(parallel=True, **NJ)
+def expose(W, H, F, SS, NST, T, GI, HF, HC, PL, BM, LT, LO, OC, G, seed, OX, OY, WF, HFULL):
+    IMG = np.zeros((H, W, 3), np.float32)       # surfaces
+    BMS = np.zeros((H, W, 3), np.float32)       # lit smoke (softened afterwards); the last channel is how far the ray went
+    FLM = np.zeros((H, W, 3), np.float32)       # flame
+    cp = math.cos(PITCH); spi = math.sin(PITCH)
+    oy0 = ground0(CAMX, CAMZ) + EYE
+    for j in prange(H):
+        o6 = np.zeros(8); bo = np.zeros(6); fo = np.zeros(3); fl = np.zeros(3)
+        s = ((seed + j * 7919) * 2654435761) &amp; 0xffffffff
+        s = (s ^ (s &gt;&gt; 15)) &amp; 0xffffffff
+        for q in range(4): s, r0 = lcg(s)
+        for i in range(W):
+            cr = 0.0; cg = 0.0; cb = 0.0
+            br = 0.0; fr = 0.0; fg = 0.0; fb = 0.0
+            for sy in range(SS):
+                for sx in range(SS):
+                    s, r1 = lcg(s); s, r2 = lcg(s); s, r3 = lcg(s)
+                    u = (i + OX + (sx + r1) / SS - WF * 0.5) / F
+                    v = -(j + OY + (sy + r2) / SS - HFULL * VC) / F
+                    dx = u; dy = v * cp + spi; dz = cp - v * spi
+                    dl = math.sqrt(dx * dx + dy * dy + dz * dz)
+                    dx /= dl; dy /= dl; dz /= dl
+                    t, m, ti = march(CAMX, oy0, CAMZ, dx, dy, dz, 230.0, T, GI)
+                    lr = 0.0; lg = 0.0; lb = 0.0
+                    if m &gt; 0:
+                        px = CAMX + dx * t; py = oy0 + dy * t; pz = CAMZ + dz * t
+                        lod = 0 if t &lt; 26.0 else 1
+                        nx, ny, nz = normal(px, py, pz, t, T, GI, lod)
+                        ar = 0.2; ag = 0.2; ab = 0.2; cav = 0.0; spec = 0.0
+                        fp = t / F
+                        if m == M_TRUNK:
+                            bark_rgb(px, py, pz, T, ti, fp, bo)
+                            ar = bo[0]; ag = bo[1]; ab = bo[2]; cav = min(bo[3], 1.0)
+                            spec = 0.05 * bo[4]
+                            # rake the fine relief
+                            e = max(0.7 * fp, 0.0006)
+                            h0 = bark_at(px, py, pz, T, ti, fp)
+                            gx = (bark_at(px + e, py, pz, T, ti, fp) - h0) / e
+                            gy = (bark_at(px, py + e, pz, T, ti, fp) - h0) / e
+                            gz = (bark_at(px, py, pz + e, T, ti, fp) - h0) / e
+                            gd = gx * nx + gy * ny + gz * nz
+                            kb = 0.034 if T[ti, 5] == 0 else 0.012
+                            nx -= kb * (gx - gd * nx); ny -= kb * (gy - gd * ny); nz -= kb * (gz - gd * nz)
+                            nl = math.sqrt(nx * nx + ny * ny + nz * nz); nx /= nl; ny /= nl; nz /= nl
+                        elif m == M_GROUND or m == M_STICK or m == M_CONE or m == M_CHIP:
+                            burn = fmap(BM, px, pz, FMS * 4)
+                            n1 = fbm3(px * 1.1, 0.5, pz * 1.1, 3); n2 = noise3(px * 17.0, 0.4, pz * 17.0)
+                            n3 = noise3(px * 70.0, 0.4, pz * 70.0)
+                            if m == M_GROUND:
+                                # duff: red-brown scale and tan needle, grey where it is old, darker where it holds the damp
+                                ar = 0.150 + 0.085 * n1; ag = 0.092 + 0.050 * n1; ab = 0.056 + 0.030 * n1
+                                gy2 = sstep(0.45, 0.75, fbm3(px * 0.37 + 9.0, 2.5, pz * 0.37, 3))
+                                ar += (0.22 - ar) * 0.6 * gy2; ag += (0.19 - ag) * 0.6 * gy2; ab += (0.155 - ab) * 0.6 * gy2
+                                nd = needles(px, pz, fp)
+                                k = (0.62 + 0.42 * n2 + 0.34 * (n3 - 0.5) * sstep(0.012, 0.004, fp)) * (0.55 + 0.9 * nd)
+                                ar *= k; ag *= k * (1.0 + 0.12 * (nd - 0.5)); ab *= k
+                                e = max(0.7 * fp, 0.0005)
+                                h0 = duff_h(px, pz, fp)
+                                gx = (duff_h(px + e, pz, fp) - h0) / e; gz = (duff_h(px, pz + e, fp) - h0) / e
+                                nx -= gx; nz -= gz
+                                nl = math.sqrt(nx * nx + ny * ny + nz * nz); nx /= nl; ny /= nl; nz /= nl
+                                cav = 0.5 * sstep(0.55, 0.2, n2) * sstep(0.03, 0.01, fp)
+                            elif m == M_STICK:
+                                k = 0.55 + 0.9 * n3 * n2
+                                ar = 0.16 * k; ag = 0.125 * k; ab = 0.095 * k
+                            elif m == M_CONE:
+                                ar = 0.26 + 0.10 * n3; ag = 0.19 + 0.06 * n3; ab = 0.115 + 0.03 * n3
+                            else:
+                                ar = 0.22 + 0.10 * n2; ag = 0.115 + 0.05 * n2; ab = 0.062 + 0.02 * n2
+                                k = 0.7 + 0.6 * n3
+                                ar *= k; ag *= k; ab *= k
+                            if burn &gt; 0.0:
+                                # ash: black, with white where it burned clean
+                                wa = sstep(0.60, 0.82, fbm3(px * 3.3, 0.9, pz * 3.3, 3)) * sstep(0.5, 1.0, burn)
+                                c0 = 0.020 + 0.022 * n3 + 0.30 * wa * (0.6 + 0.4 * n2)
+                                ar += (c0 * 1.02 - ar) * burn; ag += (c0 - ag) * burn; ab += (c0 * 0.98 - ab) * burn
+                        elif m == M_SHIRT:
+                            f = 0.86 + 0.20 * noise3(px * 30.0, py * 30.0, pz * 30.0)
+                            sm = sstep(0.40, 0.75, fbm3(px * 9.0, py * 9.0, pz * 9.0, 2))      # soot
+                            ar = 0.86 * f * (1 - 0.30 * sm); ag = 0.61 * f * (1 - 0.36 * sm); ab = 0.040 * f
+                        elif m == M_PANTS:
+                            f = 0.8 + 0.4 * noise3(px * 25.0, py * 25.0, pz * 25.0)
+                            ar = 0.050 * f; ag = 0.055 * f; ab = 0.038 * f
+                        elif m == M_BOOT:
+                            ar = 0.035; ag = 0.030; ab = 0.026
+                        elif m == M_SKIN:
+                            ar = 0.30; ag = 0.20; ab = 0.14
+                        elif m == M_HELMET:
+                            ar = 0.40; ag = 0.38; ab = 0.34; spec = 0.08
+                        elif m == M_PACK:
+                            f = 0.7 + 0.6 * noise3(px * 40.0, py * 40.0, pz * 40.0)
+                            ar = 0.050 * f; ag = 0.046 * f; ab = 0.042 * f
+                        elif m == M_TORCH:
+                            ar = 0.30; ag = 0.29; ab = 0.28; spec = 0.25
+                        elif m == M_SHROUD:
+                            f = 0.8 + 0.3 * noise3(px * 30.0, py * 30.0, pz * 30.0)
+                            ar = 0.62 * f; ag = 0.47 * f; ab = 0.10 * f
+                        elif m == M_GLOVE:
+                            ar = 0.30; ag = 0.22; ab = 0.13
+                        ao = ambient_occ(px, py, pz, nx, ny, nz, T, GI)
+                        ao *= 1.0 - 0.62 * cav
+                        # the fire, lamp by lamp; then what the lit smoke gives back; then the sky, which is almost nothing
+                        fire_light(px, py, pz, nx, ny, nz, LT, LO, OC, fl)
+                        gv = glow(G, px + nx * 0.3, py + ny * 0.3 + 0.2, pz + nz * 0.3)
+                        e = (fl[0] * (0.35 + 0.65 * ao) * (1.0 - 0.72 * cav) + 0.060 * gv * ao)
+                        skv = (0.5 + 0.5 * ny) * ao
+                        er = FIR * e + SKR * skv; eg = FIG * e + SKG * skv; eb = FIB * e + SKB * skv
+                        lr = ar * er / math.pi; lg = ag * eg / math.pi; lb = ab * eb / math.pi
+                        if spec &gt; 0.0:
+                            lr += spec * 0.02 * FIR * e; lg += spec * 0.02 * FIG * e; lb += spec * 0.02 * FIB * e
+                        if m == M_GROUND:
+                            bq = fmap(BM, px, pz, FMS * 4)
+                            if bq &gt; 0.2:
+                                # the duff goes on glowing where the flame has just been, and in spots for hours after
+                                hot = sstep(0.2, 0.8, bq) * sstep(1.0, 0.86, bq)
+                                em = hot * sstep(0.42, 0.75, noise3(px * 23.0, 5.0, pz * 23.0)) * (0.3 + 0.7 * noise3(px * 90.0, 2.0, pz * 90.0))
+                                sp2 = sstep(0.78, 0.90, noise3(px * 37.0, 5.0, pz * 37.0)) * sstep(0.50, 0.72, noise3(px * 1.9, 8.0, pz * 1.9)) * sstep(0.5, 1.0, bq)
+                                em = 0.55 * em + 0.9 * sp2
+                                lr += 0.80 * em; lg += 0.17 * em * (0.6 + 0.8 * em); lb += 0.012 * em
+                    # the air in front of it
+                    air(CAMX, oy0, CAMZ, dx, dy, dz, t, r3, NST, PL, G, o6)
+                    Tr = o6[1]
+                    cr += lr * Tr; cg += lg * Tr; cb += lb * Tr
+                    if m == 0:
+                        # sky: a little cold light, where the smoke lets it through
+                        cr += Tr * SKR * 0.25; cg += Tr * SKG * 0.25; cb += Tr * SKB * 0.25
+                    br += o6[0]
+                    if sx == 0 and sy == 0: BMS[j, i, 2] = t
+                    if dy &lt; 0.40:
+                        flames(CAMX, oy0, CAMZ, dx, dy, dz, t, r3, HF, HC, fo)
+                        if fo[0] &gt; 0.0:
+                            tf = math.exp(-SIG0 * 1.2 * min(t, 60.0))
+                            fr += fo[0] * tf; fg += fo[1] * tf; fb += fo[2] * tf
+            k = 1.0 / (SS * SS)
+            IMG[j, i, 0] = cr * k; IMG[j, i, 1] = cg * k; IMG[j, i, 2] = cb * k
+            BMS[j, i, 0] = br * k
+            FLM[j, i, 0] = fr * k; FLM[j, i, 1] = fg * k; FLM[j, i, 2] = fb * k
+    return IMG, BMS, FLM
+
+
+# ------------------------------------------------------------------ the plan of the grove and of the fire
+def plant(rng):
+    &quot;&quot;&quot;T rows: x, z, R, base y, seed, kind, scar angle, scar half-width, scar height, lean x, lean z, height&quot;&quot;&quot;
+    rows = []
+    #            x      z     R    scar: angle (deg, 0 = +x, -90 faces the lens), half-width, height
+    monarchs = [(-10.6, 12.4, 3.30,  -20, 0.0, 0.0),
+                (7.6,  27.5, 3.50, -125, 1.3, 8.0),
+                (-8.5, 41.0, 3.00, -70, 0.8, 4.5),
+                (22.0, 36.0, 3.10, -150, 0.0, 0.0),
+                (1.5,  63.0, 3.20, -100, 1.0, 6.0),
+                (-27.0, 57.0, 3.00, -40, 0.9, 5.0),
+                (17.5, 79.0, 3.00, -90, 0.0, 0.0),
+                (-12.0, 93.0, 3.10, -90, 0.8, 5.0),
+                (35.0, 66.0, 3.00, -120, 0.9, 5.0),
+                (-43.0, 85.0, 3.0, -90, 0.0, 0.0),
+                (5.0, 120.0, 3.2, -90, 0.0, 0.0)]
+    for k, (x, z, R, sa, hw, hs) in enumerate(monarchs):
+        rows.append([x, z, R, 0, 3.0 + 7.31 * k, 0, math.radians(sa), hw, hs,
+                     0.006 * rng.standard_normal(), 0.006 * rng.standard_normal(), 90.0])
+    n = 0
+    while n &lt; 78:
+        x = rng.uniform(-55, 55); z = rng.uniform(5, 135)
+        if abs(x) &gt; 0.85 * z + 8: continue
+        if abs(x) &lt; 3.0 and z &lt; 22: continue                      # keep the walk in clear
+        if abs(x - FIGX) &lt; 2.0 and abs(z - FIGZ) &lt; 3.0: continue
+        R = rng.choice([0.20, 0.28, 0.36, 0.45, 0.60, 0.80], p=[0.20, 0.25, 0.22, 0.16, 0.11, 0.06])
+        if z &lt; 16 and R &gt; 0.4: continue
+        if z &lt; 30 and abs(x / z - 0.276) &lt; 0.17: continue          # nothing in front of the scarred one
+        ok = True
+        for r in rows:
+            dd = math.hypot(x - r[0], z - r[1])
+            if dd &lt; (r[2] * 2.1 + 1.2 if r[5] == 0 else r[2] + R + 1.4): ok = False; break
+        if not ok: continue
+        kind = 1 if rng.random() &lt; 0.45 else 2
+        rows.append([x, z, R, 0, rng.uniform(0, 50), kind, 0, 0, 0,
+                     0.014 * rng.standard_normal(), 0.014 * rng.standard_normal(), 90.0])
+        n += 1
+    T = np.array(rows, np.float64)
+    return T
+
+def seat(T):
+    &quot;&quot;&quot;stand each tree on the ground, and index them on a grid&quot;&quot;&quot;
+    for i in range(T.shape[0]):
+        T[i, 3] = ground0(T[i, 0], T[i, 1]) - (0.5 if T[i, 5] == 0 else 0.2)
+    GI = -np.ones((GNZ, GNX, KMAX), np.int32)
+    for i in range(T.shape[0]):
+        rb = T[i, 2] * (1.75 if T[i, 5] == 0 else 1.45) + MARG + 0.55 + 45.0 * math.hypot(T[i, 9], T[i, 10])
+        i0 = int((T[i, 0] - rb - GX0) / CS); i1 = int((T[i, 0] + rb - GX0) / CS)
+        j0 = int((T[i, 1] - rb - GZ0) / CS); j1 = int((T[i, 1] + rb - GZ0) / CS)
+        for cj in range(max(j0, 0), min(j1, GNZ - 1) + 1):
+            for ci in range(max(i0, 0), min(i1, GNX - 1) + 1):
+                qx = min(max(T[i, 0], GX0 + ci * CS), GX0 + (ci + 1) * CS)
+                qz = min(max(T[i, 1], GZ0 + cj * CS), GZ0 + (cj + 1) * CS)
+                if math.hypot(qx - T[i, 0], qz - T[i, 1]) &gt; rb: continue
+                for q in range(KMAX):
+                    if GI[cj, ci, q] &lt; 0:
+                        GI[cj, ci, q] = i; break
+                else:
+                    raise RuntimeError(&#x27;cell full&#x27;)
+    return GI
+
+def seg_dist(X, Z, pts):
+    d = np.full(X.shape, 1e9, np.float32)
+    for (ax, az), (bx, bz) in zip(pts[:-1], pts[1:]):
+        ex, ez = bx - ax, bz - az
+        h = np.clip(((X - ax) * ex + (Z - az) * ez) / (ex * ex + ez * ez), 0, 1)
+        d = np.minimum(d, np.hypot(X - ax - ex * h, Z - az - ez * h))
+    return d
+
+def nz(rng, shape, sig):
+    a = gaussian_filter(rng.standard_normal(shape).astype(np.float32), sig, mode=&#x27;wrap&#x27;)
+    return a / (a.std() + 1e-9)
+
+STRIPS = (  # z where it crosses x = 0, how it runs with x, age (0 just lit .. 1 an hour), x from, x to
+    (27.2, -0.045, 0.00, -34.0, 0.0),
+    (37.0, 0.050, 0.30, -44.0, 46.0),
+    (49.5, -0.030, 0.55, -50.0, 50.0),
+    (65.0, 0.045, 0.78, -50.0, 50.0),
+    (83.0, -0.020, 1.00, -50.0, 50.0))
+
+def light_fire(rng, T):
+    &quot;&quot;&quot;the unit an hour in.  Returns flame-height map, its coarse maximum, plume source, burn mask, lamps.&quot;&quot;&quot;
+    n = FMN
+    ax = FM0X + np.arange(n, dtype=np.float32) * FMS
+    X, Z = np.meshgrid(ax, FM0Z + np.arange(n, dtype=np.float32) * FMS)
+    warp = 0.9 * nz(rng, (n, n), 45) + 0.35 * nz(rng, (n, n), 12) + 0.10 * nz(rng, (n, n), 3.5)
+    tong = np.clip(0.42 + 0.60 * nz(rng, (n, n), 1.5) + 0.34 * nz(rng, (n, n), 0.75) + 0.30 * nz(rng, (n, n), 5.0), 0, None) ** 1.5
+    act = np.clip(0.50 + 0.80 * nz(rng, (n, n), 30) + 0.45 * nz(rng, (n, n), 8), 0, 1.6)
+    c, s = math.cos(FIGYAW), math.sin(FIGYAW)
+    hx, hz = FIGX + 0.385 * c + 0.62 * s, FIGZ - 0.385 * s + 0.62 * c        # where the torch drips
+    keep = np.full((n, n), 1e9, np.float32)
+    for i in range(T.shape[0]):
+        if T[i, 5] == 0:
+            keep = np.minimum(keep, (np.hypot(X - T[i, 0], Z - T[i, 1]) - T[i, 2] * 1.45) * 2.5)
+    HF = np.zeros((n, n), np.float32); burn = np.zeros((n, n), np.float32)
+    for q, (z0, kx, age, xa, xb) in enumerate(STRIPS):
+        zc = z0 + kx * X + 1.6 * np.sin(X * 0.21 + 1.7 * q) + 0.7 * np.sin(X * 0.63 + 0.9 * q)
+        if q == 0:
+            # the one being laid: it ends at the torch, and is seconds old there
+            zc = zc + (hz - (z0 + kx * hx + 1.6 * math.sin(hx * 0.21) + 0.7 * math.sin(hx * 0.63)))
+            xb = hx
+            a = np.clip((hx - X) / 26.0, 0, 1) * 0.22
+        else:
+            a = age * (0.75 + 0.5 * np.clip(act, 0, 1.2) * 0.5)
+        ends = np.clip((X - xa) / 2.0, 0, 1) * np.clip((xb - X) / (0.3 if q == 0 else 2.0), 0, 1)
+        # it has eaten uphill faster than down: the black is wider above the line than below it
+        up = 0.15 + 9.5 * a ** 1.5; dn = 0.05 + 2.2 * a ** 1.5
+        dz = Z - zc + 0.5 * warp * np.minimum(a * 4.0, 1.0)
+        phi = np.where(dz &gt; 0, 1.0 - dz / up, 1.0 + dz / dn)             # 1 on the line it was lit along, 0 at the edge
+        phi = np.minimum(phi, keep) * ends + (ends - 1.0)
+        burn = np.maximum(burn, np.clip(phi / 0.10 * np.maximum(up, dn).clip(0.3, 3.0) * 0.5, 0, 1))
+        edge = np.where(dz &gt; 0, phi * up, phi * dn)                         # metres in from the edge
+        band = np.exp(-((edge - 0.04) / 0.10) ** 2) * (phi &gt; -0.5)
+        # the head (uphill edge) carries more flame than the backing edge; an old strip is mostly out
+        live = np.where(dz &gt; 0, 1.0, 0.55) * (1.0 - 0.80 * a ** 2 * (act &lt; 0.9))
+        HF += (0.30 + 0.16 * (a &gt; 0.05)) * band * tong * np.clip(act + (0.45 if q == 0 else 0.0), 0, 1.5) * live
+    burn = burn.astype(np.float32)
+    # things still burning in the black: stump holes, the ends of limbs
+    for k in range(46):
+        sx = rng.uniform(-46, 46); sz = rng.uniform(30, 92)
+        rad = rng.uniform(0.12, 0.30)
+        j = int((sz - FM0Z) / FMS); i = int((sx - FM0X) / FMS)
+        if burn[j, i] &lt; 0.99: continue
+        r = int(4 * rad / FMS)
+        sl = (slice(j - r, j + r), slice(i - r, i + r))
+        HF[sl] += rng.uniform(0.2, 0.5) * np.exp(-((X[sl] - sx) ** 2 + (Z[sl] - sz) ** 2) / rad ** 2) * tong[sl]
+    # the torch itself drips fire
+    HF += 0.16 * np.exp(-((X - hx) ** 2 + (Z - hz) ** 2) / 0.05 ** 2)
+    HF = 0.62 * np.tanh(HF / 0.62)
+    HF[HF &lt; 0.03] = 0
+    HF = HF.astype(np.float32)
+    m = n // FCK
+    HC = HF.reshape(m, FCK, m, FCK).max(axis=(1, 3))
+    HC = maximum_filter(HC, 3).astype(np.float32)
+    PL = HF.reshape(m, FCK, m, FCK).mean(axis=(1, 3))
+    PL = gaussian_filter(PL, 1.6).astype(np.float32)
+    BM = burn.reshape(n // 4, 4, n // 4, 4).mean(axis=(1, 3)).astype(np.float32)
+    # lamps: one for each metre and a half of fire
+    q = 70
+    P = (HF ** 1.5).reshape(n // q, q, n // q, q).sum(axis=(1, 3)) * FMS * FMS
+    wx = (HF ** 1.5 * X).reshape(n // q, q, n // q, q).sum(axis=(1, 3)) * FMS * FMS
+    wz = (HF ** 1.5 * Z).reshape(n // q, q, n // q, q).sum(axis=(1, 3)) * FMS * FMS
+    jj, ii = np.nonzero(P &gt; 2e-4)
+    LT = np.zeros((len(jj), 4))
+    for k, (j, i) in enumerate(zip(jj, ii)):
+        x = wx[j, i] / P[j, i]; z = wz[j, i] / P[j, i]
+        LT[k] = (x, ground0(x, z) + 0.30, z, P[j, i] * 520.0)
+    return HF, HC, PL, BM, LT
+
+def posts(T, LT):
+    &quot;&quot;&quot;what can stand between a lamp and a surface: every trunk, and the firefighter.  And for each lamp, which of
+    them are near enough to matter.&quot;&quot;&quot;
+    OC = np.zeros((T.shape[0] + 1, 5))
+    OC[:-1, 0] = T[:, 0]; OC[:-1, 1] = T[:, 1]; OC[:-1, 2] = T[:, 3]; OC[:-1, 3] = T[:, 2]; OC[:-1, 4] = 200.0
+    OC[-1] = (FIGX, FIGZ, ground0(FIGX, FIGZ), 0.17, 1.75)
+    K = 48
+    LO = -np.ones((LT.shape[0], K), np.int32)
+    for k in range(LT.shape[0]):
+        d = np.hypot(OC[:, 0] - LT[k, 0], OC[:, 1] - LT[k, 2]) - OC[:, 3]
+        o = np.argsort(d)
+        o = o[d[o] &lt; 52.0][:K]
+        LO[k, :len(o)] = o
+    return OC, LO
+
+# ------------------------------------------------------------------ the print
+EXPOSURE = 9.0
+ADAPT = 0.10
+
+def develop(lin, scale, rng, exposure):
+    &quot;&quot;&quot;no lens.  The eye&#x27;s adaptation, a restrained curve, then a fine tooth.&quot;&quot;&quot;
+    H, W = lin.shape[:2]
+    lin = np.maximum(lin, 0.0) * exposure
+    L = 0.2126 * lin[..., 0] + 0.7152 * lin[..., 1] + 0.0722 * lin[..., 2]
+    lg = np.log(np.clip(L, 1e-4, 80.0))
+    base = gaussian_filter(lg, 70.0 * scale)
+    gain = np.clip(np.exp(-ADAPT * (base - math.log(0.10))), 0.4, 2.2)
+    lin = lin * gain[..., None]; L = L * gain
+    wp = 5.0
+    f = lambda x: x * (1.0 + x / wp ** 2) / (1.0 + x)
+    y = 0.72 * lin * (f(L) / np.maximum(L, 1e-9))[..., None] + 0.28 * f(lin)
+    y = np.clip(y, 0.0, 1.0)
+    y = np.where(y &lt;= 0.0031308, 12.92 * y, 1.055 * np.power(np.maximum(y, 1e-9), 1 / 2.4) - 0.055)
+    y = y + 0.30 * (y * y * (3 - 2 * y) - y)
+    y = 0.016 + 0.968 * y
+    g = gaussian_filter(rng.standard_normal((H, W)), 0.6 * max(scale, 0.5)); g /= g.std()
+    g2 = gaussian_filter(rng.standard_normal((H, W)), 2.2 * max(scale, 0.5)); g2 /= g2.std()
+    lum = y.mean(-1, keepdims=True)
+    amp = 0.004 + 0.008 * np.sqrt(np.clip(4 * lum * (1 - lum), 0, 1))
+    y = y + amp * (0.85 * g[..., None] + 0.35 * g2[..., None])
+    return np.clip(y, 0, 1)
+
+
+def sign(img, scale, text):
+    &quot;&quot;&quot;three rings, like a core seen end-on, lower left, and the age of the oldest tree in the picture.&quot;&quot;&quot;
+    H, W = img.shape[:2]
+    u = max(scale, 0.2)
+    cw, ch = int(360 * u), int(74 * u)
+    k = 4
+    im = Image.new(&#x27;L&#x27;, (cw * k, ch * k), 0); d = ImageDraw.Draw(im)
+    lw = max(int(2.8 * u * k), 2)
+    cx, cy = 36 * u * k, 37 * u * k
+    for r in (7, 16, 25):
+        rr = r * u * k
+        d.ellipse([cx - rr, cy - rr * 0.94, cx + rr, cy + rr * 0.94], outline=255, width=lw)
+    font = ImageFont.truetype(&#x27;/usr/share/fonts/opentype/urw-base35/NimbusSans-Regular.otf&#x27;, int(38 * u * k))
+    d.text((cx + 44 * u * k, cy - 23 * u * k), text, fill=255, font=font)
+    im = im.resize((cw, ch), Image.LANCZOS)
+    m = np.asarray(im, np.float64) / 255.0
+    x0 = int(70 * u); y0 = H - ch - int(64 * u)
+    reg = img[y0:y0 + ch, x0:x0 + cw]
+    lum = reg.mean()
+    if lum &gt; 0.30:
+        out = reg * (1.0 - 0.50 * m[..., None])
+    else:
+        out = reg + (0.34 - reg) * 0.75 * m[..., None]
+    img[y0:y0 + ch, x0:x0 + cw] = np.clip(out, 0, 1)
+    return img
+
+
+SMOKE_GAIN = 0.020
+FLAME_GAIN = 0.16
+
+def sparks(rng, HF, DEP, W, H, F, OX, OY, WF, HFULL, scale):
+    &quot;&quot;&quot;what the fire throws up: a few hundred points of orange, each drawn the length it travels in a fiftieth of a second&quot;&quot;&quot;
+    out = np.zeros((H, W, 3))
+    jj, ii = np.nonzero(HF &gt; 0.30)
+    if len(jj) == 0: return out
+    oy0 = ground0(CAMX, CAMZ) + EYE
+    pick = rng.integers(0, len(jj), 260)
+    for q in pick:
+        x0 = FM0X + ii[q] * FMS; z0 = FM0Z + jj[q] * FMS
+        hh = 0.3 + 6.0 * rng.random() ** 2.6
+        x = x0 + WINDX * hh + 0.25 * hh * rng.standard_normal(); z = z0 + WINDZ * hh + 0.25 * hh * rng.standard_normal()
+        y = ground0(x0, z0) + hh
+        if z &lt; 1.0: continue
+        u = x / z * F + WF * 0.5 - OX; v = HFULL * VC - (y - oy0) / z * F - OY
+        if u &lt; 2 or v &lt; 6 or u &gt;= W - 2 or v &gt;= H - 2: continue
+        if DEP[int(v), int(u)] &lt; math.hypot(x, z) - 0.2: continue
+        life = math.exp(-hh / 3.5) * (0.4 + 0.6 * rng.random())
+        ln = max(1.0, (0.012 + 0.03 * rng.random()) / z * F)                # streak, in pixels
+        sg = max(0.55, 0.011 / z * F)
+        r = int(3 * sg + ln) + 2
+        ys, xs = np.mgrid[-r:r + 1, -r:r + 1]
+        tilt = 0.3 * rng.standard_normal()
+        dd = (xs - tilt * ys) ** 2 + np.maximum(np.abs(ys) - ln * 0.5, 0) ** 2
+        k = np.exp(-dd / (2 * sg * sg)) * life * 1.3 / max(ln * 0.6, 1.0)
+        v0, u0 = int(v), int(u)
+        if v0 - r &lt; 0 or u0 - r &lt; 0 or v0 + r + 1 &gt; H or u0 + r + 1 &gt; W: continue
+        out[v0 - r:v0 + r + 1, u0 - r:u0 + r + 1] += k[..., None] * np.array([1.0, 0.42 * (0.5 + 0.5 * life), 0.06])
+    return out
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith(&#x27;--&#x27;)]
+    scale = float(args[0]) if len(args) &gt; 0 else 1.0
+    out = args[1] if len(args) &gt; 1 else __file__.replace(&#x27;.py&#x27;, &#x27;.png&#x27;)
+    W = int(round(FW * scale)); H = int(round(FH * scale)); F = FOC * scale
+    WF, HFULL = W, H
+    rng = np.random.default_rng(SEED)
+    t0 = time.time()
+    T = plant(rng)
+    GI = seat(T)
+    HF, HC, PL, BM, LT = light_fire(rng, T)
+    OC, LO = posts(T, LT)
+    G = bake(LT, LO, OC)
+    print(&#x27;trees %d, lamps %d, air lit  %.0fs&#x27; % (T.shape[0], LT.shape[0], time.time() - t0), flush=True)
+    OX = OY = 0; crop = None
+    SS = 2; NST = 96
+    for a in sys.argv:
+        if a.startswith(&#x27;--crop=&#x27;):
+            crop = [int(v) for v in a[7:].split(&#x27;,&#x27;)]
+            OX, OY = crop[0], crop[1]; W = crop[2] - crop[0]; H = crop[3] - crop[1]
+        if a.startswith(&#x27;--ss=&#x27;): SS = int(a[5:])
+    IMG, BMS, FLM = expose(W, H, F, SS, NST, T, GI, HF, HC, PL, BM, LT, LO, OC, G, SEED % 9973, OX, OY, WF, HFULL)
+    print(&#x27;exposed  %.0fs&#x27; % (time.time() - t0), flush=True)
+    lin = IMG.astype(np.float64)
+    # smoke lights the smoke beside it
+    b = BMS[..., 0].astype(np.float64)
+    b = 0.72 * b + 0.20 * gaussian_filter(b, 6.0 * scale) + 0.08 * gaussian_filter(b, 36.0 * scale)
+    lin += b[..., None] * np.array([FIR, FIG * 0.92, FIB * 0.85]) * SMOKE_GAIN
+    # flame, with the glow the eye puts round it in the dark
+    fl = FLM.astype(np.float64)
+    gl = np.stack([gaussian_filter(fl[..., c], 5.0 * scale) for c in range(3)], -1)
+    gl2 = np.stack([gaussian_filter(fl[..., c], 26.0 * scale) for c in range(3)], -1)
+    fl = np.stack([gaussian_filter(fl[..., c], 0.55 * scale) for c in range(3)], -1)
+    lin += FLAME_GAIN * (0.80 * fl + 0.13 * gl + 0.07 * gl2)
+    lin += sparks(rng, HF, BMS[..., 2], W, H, F, OX, OY, WF, HFULL, scale)
+    if &#x27;--keep&#x27; in sys.argv: np.save(out.replace(&#x27;.png&#x27;, &#x27;_lin.npy&#x27;), lin.astype(np.float32))
+    img = develop(lin, scale, rng, EXPOSURE)
+    if crop is None: img = sign(img, scale, OLDEST)
+    Image.fromarray((img * 255 + rng.random(img.shape)).clip(0, 255).astype(np.uint8)).save(out)
+    print(&#x27;saved&#x27;, out, &#x27;%dx%d  %.0fs&#x27; % (W, H, time.time() - t0), flush=True)
+
+
+if __name__ == &#x27;__main__&#x27;:
+    main()
+</pre>
+</main>
+<footer class="foot"><p>Antara. Winter programme, 12 November 2026 to 28 February 2027. <a href="https://github.com/shyamvalsan/antara" rel="noopener">Source code on GitHub</a>.</p></footer>
+
+</body>
+</html>
